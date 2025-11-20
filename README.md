@@ -40,6 +40,31 @@ The Dockerfile uses the Rust nightly toolchain to support the 2024 edition; this
 
 Note: the runtime image now installs `nodejs` so that Node-based `claude` CLI builds work when you mount the binary.
 
+### Mounting credentials
+
+The CLI stores login state on disk (e.g., `~/.claude/credentials.json` and/or `~/.config/claude/credentials.json`). Mount those paths into the container and set `HOME` so the gateway can reuse your host login:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e HOME=/home/app \
+  -v /full/path/to/claude:/usr/local/bin/claude:ro \
+  -v ~/.claude:/home/app/.claude \
+  -v ~/.config/claude:/home/app/.config/claude \
+  ghcr.io/<owner>/<repo>:latest
+```
+
+If your creds are only in the macOS keychain, they can’t be mounted; run an interactive login inside the container once:
+
+```bash
+docker run -it --rm \
+  -e HOME=/home/app \
+  -v /full/path/to/claude:/usr/local/bin/claude:ro \
+  -v ~/.claude:/home/app/.claude \
+  -v ~/.config/claude:/home/app/.config/claude \
+  ghcr.io/<owner>/<repo>:latest \
+  claude /login
+```
+
 ## What you get
 
 - **Streaming mode:** SSE chunks mirroring OpenAI deltas while the Claude CLI is running.
