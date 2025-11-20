@@ -28,6 +28,7 @@ docker run --rm -p 8080:8080 \
   -v /full/path/to/claude:/usr/local/bin/claude:ro \
   ghcr.io/<owner>/<repo>:latest
 ```
+The image sets `/usr/local/bin/package.json` to `"type": "module"` so that ESM-based `claude` binaries execute without module warnings.
 
 Build locally instead:
 

@@ -27,6 +27,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Treat binaries in /usr/local/bin as ES modules so the mounted `claude` script (ESM)
+# executes without "Cannot use import statement outside a module".
+RUN printf '{ "type": "module" }\n' > /usr/local/bin/package.json
+
 # App user keeps runtime minimal and non-root.
 RUN useradd -m app
 WORKDIR /home/app
