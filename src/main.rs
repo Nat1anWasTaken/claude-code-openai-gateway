@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use sha2::{Digest, Sha256};
 use hex::encode as hex_encode;
+use futures::stream;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -215,7 +216,7 @@ async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
             let _ = tx.send(Ok(make_done_event(&id, &model, created, None))).await;
         });
 
-        let stream = ReceiverStream::new(rx).map(|item| -> Result<Event, Infallible> {
+        let stream = ReceiverStream::new(rx).chain(stream::once(async { Ok(Event::default().data("[DONE]")) })).map(|item| -> Result<Event, Infallible> {
             match item {
                 Ok(ev) => Ok(ev),
                 Err(err) => Ok(Event::default().data(format!(r#"{{"error":"{}"}}"#, err))),
@@ -273,20 +274,11 @@ async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
                 finish_reason: "stop".into(),
                 message: OAChatMessageOut {
                     role: "assistant".into(),
-                    content: vec![OAContentPart {
-                        r#type: "text".into(),
-                        text: final_text,
-                    }],
+                    content: final_text,
                 },
             }],
             usage,
         };
-        println!(
-            "sending completion id={} len={} chars usage_present={}",
-            response.id,
-            response.choices[0].message.content.iter().map(|c| c.text.len()).sum::<usize>(),
-            response.usage.is_some()
-        );
         Ok(Json(response).into_response())
     }
 }
@@ -308,12 +300,9 @@ fn make_delta_event(
             delta: Delta {
                 role: role.map(|s| s.to_string()),
                 content: if text.is_empty() {
-                    vec![]
+                    None
                 } else {
-                    vec![OAContentPart {
-                        r#type: "text".into(),
-                        text: text.to_string(),
-                    }]
+                    Some(text.to_string())
                 },
             },
             finish_reason: None,
@@ -322,12 +311,12 @@ fn make_delta_event(
     Event::default().data(serde_json::to_string(&delta).unwrap())
 }
 
-fn make_done_event(id: &str, model: &str, created: u64, usage: Option<Value>) -> Event {
+fn make_done_event(id: &str, model: &str, created: u64, _usage: Option<Value>) -> Event {
     let choice = StreamChoice {
         index: 0,
         delta: Delta {
             role: None,
-            content: vec![],
+            content: None,
         },
         finish_reason: Some("stop".into()),
     };
@@ -338,11 +327,7 @@ fn make_done_event(id: &str, model: &str, created: u64, usage: Option<Value>) ->
         model: model.to_string(),
         choices: vec![choice],
     };
-    let mut event = Event::default().data(serde_json::to_string(&delta).unwrap());
-    if let Some(u) = usage {
-        event = event.comment(u.to_string());
-    }
-    event
+    Event::default().data(serde_json::to_string(&delta).unwrap())
 }
 
 fn unix_ts() -> u64 {
@@ -492,14 +477,7 @@ struct ChatChoice {
 #[derive(Serialize)]
 struct OAChatMessageOut {
     role: String,
-    content: Vec<OAContentPart>,
-}
-
-#[derive(Serialize)]
-struct OAContentPart {
-    #[serde(rename = "type")]
-    r#type: String,
-    text: String,
+    content: String,
 }
 
 #[derive(Serialize)]
@@ -523,8 +501,8 @@ struct StreamChoice {
 struct Delta {
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
-    #[serde(default)]
-    content: Vec<OAContentPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
 }
 
 #[derive(Error, Debug)]
