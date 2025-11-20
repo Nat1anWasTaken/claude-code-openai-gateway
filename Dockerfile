@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ### Build stage ###
-FROM rust:1.82-slim AS builder
+FROM rust:1-slim AS builder
 
 WORKDIR /app
 
@@ -10,12 +10,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates pkg-config build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# The project uses Rust 2024 edition; use nightly until stabilized in stable images.
+RUN rustup toolchain install nightly && rustup default nightly
+
 # Leverage layer caching for dependencies.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
     cargo build --release
 
 ### Runtime stage ###
