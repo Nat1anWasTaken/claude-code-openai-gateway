@@ -1,0 +1,7 @@
+# Ignore build artifacts and VCS metadata
+/target
+.git
+.gitignore
+**/*.swp
+**/*.tmp
+**/*~

@@ -19,6 +19,22 @@ Tiny Rust HTTP server that forwards OpenAI-style `POST /v1/chat/completions` req
 
 4. Send OpenAI-compatible requests to `http://localhost:8080/v1/chat/completions`.
 
+## Docker
+
+The published image does **not** bundle the Claude CLI. Mount your local `claude` binary into the container and run:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -v /full/path/to/claude:/usr/local/bin/claude:ro \
+  ghcr.io/<owner>/<repo>:latest
+```
+
+Build locally instead:
+
+```bash
+docker build -t ghcr.io/<owner>/<repo>:local .
+```
+
 ## What you get
 
 - **Streaming mode:** SSE chunks mirroring OpenAI deltas while the Claude CLI is running.
