@@ -254,13 +254,31 @@ async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
             let mut guard = cache().lock().await;
             guard.insert(conversation_hash, sid);
         }
+        let mut stderr_text = String::new();
         if let Some(child_stderr) = stderr {
             let mut err_reader = BufReader::new(child_stderr).lines();
-            if let Some(line) = err_reader.next_line().await? {
-                if !line.trim().is_empty() {
-                    return Err(GatewayError::Cli(line));
+            while let Some(line) = err_reader.next_line().await? {
+                if line.trim().is_empty() {
+                    continue;
                 }
+                if !stderr_text.is_empty() {
+                    stderr_text.push('\n');
+                }
+                stderr_text.push_str(&line);
             }
+        }
+
+        let status = child.wait().await?;
+        if !status.success() {
+            let msg = if stderr_text.is_empty() {
+                format!("claude exited with {}", status)
+            } else {
+                stderr_text
+            };
+            return Err(GatewayError::Cli(msg));
+        } else if !stderr_text.is_empty() {
+            // Warnings are printed but do not fail the request.
+            eprintln!("claude stderr: {stderr_text}");
         }
         let created = unix_ts();
         let id = format!("chatcmpl-{}", Uuid::new_v4());
