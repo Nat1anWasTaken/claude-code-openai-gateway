@@ -42,7 +42,13 @@ Note: the runtime image now installs `nodejs` so that Node-based `claude` CLI bu
 
 ### Mounting credentials
 
-The CLI stores login state on disk (e.g., `~/.claude/credentials.json` and/or `~/.config/claude/credentials.json`). Mount those paths into the container and set `HOME` so the gateway can reuse your host login:
+Where the CLI stores credentials (as of Nov 20, 2025):
+- **Linux:** file-based at `~/.claude/credentials.json` (preferred), sometimes `~/.claude/.credentials.json`, and occasionally `~/.config/claude/credentials.json` (older builds). citeturn0search3turn0search2
+- **macOS:** stored in the Keychain under service `Claude Code-credentials` (recent builds) or `Claude Code` (some affected versions). Keys are not on disk by default. Export with:  
+  `security find-generic-password -s "Claude Code-credentials" -w > ~/.claude/credentials.json`  
+  If that item doesn’t exist, try `Claude Code`. You can also run `claude /login` inside the container once to generate file-based creds. citeturn0search0turn0reddit14
+
+Mount the binary, credential files, and set `HOME` so the gateway can reuse the login:
 
 ```bash
 docker run --rm -p 8080:8080 \
@@ -53,7 +59,7 @@ docker run --rm -p 8080:8080 \
   ghcr.io/<owner>/<repo>:latest
 ```
 
-If your creds are only in the macOS keychain, they can’t be mounted; run an interactive login inside the container once:
+If your creds are only in the macOS keychain and you don’t want to export them, log in once inside the container to generate file-based creds:
 
 ```bash
 docker run -it --rm \
@@ -64,6 +70,8 @@ docker run -it --rm \
   ghcr.io/<owner>/<repo>:latest \
   claude /login
 ```
+
+Tip: Some builds also expect `~/.claude/.credentials.json` (note the leading dot in the filename) and `~/.claude.json` for API key fallback; mount those too if they exist on your host.
 
 ## What you get
 
