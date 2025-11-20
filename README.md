@@ -37,6 +37,8 @@ docker build -t ghcr.io/<owner>/<repo>:local .
 
 The Dockerfile uses the Rust nightly toolchain to support the 2024 edition; this is encapsulated inside the image and does not affect your host toolchain.
 
+Note: the runtime image now installs `nodejs` so that Node-based `claude` CLI builds work when you mount the binary.
+
 ## What you get
 
 - **Streaming mode:** SSE chunks mirroring OpenAI deltas while the Claude CLI is running.
