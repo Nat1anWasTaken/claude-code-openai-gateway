@@ -85,6 +85,12 @@ async fn handler(State(_state): State<AppState>, Json(req): Json<ChatRequest>) -
 }
 
 async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
+    println!(
+        "incoming request: model={} stream={} messages={}",
+        req.model,
+        req.stream,
+        req.messages.len()
+    );
     let messages_len = req.messages.len();
     let (system_prompt, _) = flatten_messages(&req.messages);
 
@@ -114,6 +120,16 @@ async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
     if let Some(sid) = resume_session.as_ref() {
         cmd.arg("--resume").arg(sid);
     }
+    println!(
+        "spawning claude: resume={} model={} stream={}",
+        resume_session
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or("<new>"),
+        req.model,
+        req.stream
+    );
+
     let mut child = cmd
         .arg("-p")
         .arg(prompt)
@@ -156,6 +172,7 @@ async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
                 if line.trim().is_empty() {
                     continue;
                 }
+                println!("[claude stdout stream] {line}");
                 match serde_json::from_str::<ClaudeRecord>(&line) {
                     Ok(rec) => {
                         match rec {
@@ -218,6 +235,7 @@ async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
             if line.trim().is_empty() {
                 continue;
             }
+            println!("[claude stdout collect] {line}");
             if let Ok(rec) = serde_json::from_str::<ClaudeRecord>(&line) {
                 match rec {
                     ClaudeRecord::SystemInit { session_id, .. } => {
@@ -263,6 +281,12 @@ async fn process_request(req: ChatRequest) -> Result<Response, GatewayError> {
             }],
             usage,
         };
+        println!(
+            "sending completion id={} len={} chars usage_present={}",
+            response.id,
+            response.choices[0].message.content.iter().map(|c| c.text.len()).sum::<usize>(),
+            response.usage.is_some()
+        );
         Ok(Json(response).into_response())
     }
 }
