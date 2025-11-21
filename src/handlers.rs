@@ -83,13 +83,18 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     let conversation_hash = compute_message_hash(&req.messages);
     let (system_prompt, _) = flatten_messages(&req.messages);
 
-    let (resume_session, history_prefix_len) = find_cached_prefix(
+    let (found_session, history_prefix_len) = find_cached_prefix(
         |cut| compute_message_hash(&req.messages[..cut]),
         req.messages.len(),
     )
     .await;
 
-    let new_messages = if history_prefix_len > 0 {
+    let exact_match = history_prefix_len == req.messages.len();
+    let resume_session = if exact_match { None } else { found_session };
+
+    let new_messages = if exact_match {
+        &req.messages[..]
+    } else if history_prefix_len > 0 {
         &req.messages[history_prefix_len..]
     } else {
         &req.messages[..]
