@@ -72,7 +72,8 @@ where
 {
     let cache = get_cache().lock().await;
 
-    for cut in (1..total_messages).rev() {
+    // Search from longest to shortest, including the full conversation length
+    for cut in (1..=total_messages).rev() {
         let hash = message_hashes(cut);
         if let Some(session_id) = cache.get(&hash) {
             return (Some(session_id.clone()), cut);
@@ -131,13 +132,25 @@ mod tests {
     #[tokio::test]
     async fn test_find_cached_prefix_found() {
         // Setup: cache a hash for prefix length 3
-        store_session("prefix_3".to_string(), "session_3".to_string()).await;
+        store_session("found_prefix_3".to_string(), "session_3".to_string()).await;
 
-        let hash_fn = |len: usize| format!("prefix_{}", len);
+        let hash_fn = |len: usize| format!("found_prefix_{}", len);
         let (session_id, prefix_len) = find_cached_prefix(hash_fn, 5).await;
 
         assert_eq!(session_id, Some("session_3".to_string()));
         assert_eq!(prefix_len, 3);
+    }
+
+    #[tokio::test]
+    async fn test_find_cached_prefix_full_length_found() {
+        // Setup: cache the full conversation hash (length 4)
+        store_session("full_prefix_4".to_string(), "session_4".to_string()).await;
+
+        let hash_fn = |len: usize| format!("full_prefix_{}", len);
+        let (session_id, prefix_len) = find_cached_prefix(hash_fn, 4).await;
+
+        assert_eq!(session_id, Some("session_4".to_string()));
+        assert_eq!(prefix_len, 4);
     }
 
     #[tokio::test]
