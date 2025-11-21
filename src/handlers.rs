@@ -13,7 +13,9 @@ use crate::models::openai::{
     ChatChoice, ChatCompletionResponse, ChatRequest, Delta, OAChatMessageOut, StreamChoice,
     StreamDelta,
 };
-use crate::utils::{compute_message_hash, flatten_messages, unix_timestamp};
+use crate::utils::{
+    compute_message_hash, flatten_messages, message_hash_material, unix_timestamp,
+};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -81,13 +83,46 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     );
 
     let conversation_hash = compute_message_hash(&req.messages);
+    println!("[cache hashing] full conversation hash={conversation_hash}");
+    let material_full = message_hash_material(&req.messages);
+    println!(
+        "[cache hashing] full material bytes={} preview=\"{}\"",
+        material_full.len(),
+        material_full.replace('\n', "\\n")
+    );
+    for (idx, _) in req.messages.iter().enumerate() {
+        let slice = &req.messages[..=idx];
+        let h = compute_message_hash(slice);
+        let mat = message_hash_material(slice);
+        println!(
+            "[cache hashing] prefix_len={} hash={} material=\"{}\"",
+            idx + 1,
+            h,
+            mat.replace('\n', "\\n")
+        );
+    }
     let (system_prompt, _) = flatten_messages(&req.messages);
 
-    let (resume_session, history_prefix_len) = find_cached_prefix(
-        |cut| compute_message_hash(&req.messages[..cut]),
+    let (mut resume_session, mut history_prefix_len) = find_cached_prefix(
+        |cut| {
+            let hash = compute_message_hash(&req.messages[..cut]);
+            println!("[cache lookup] querying prefix_len={cut} hash={hash}");
+            hash
+        },
         req.messages.len(),
     )
     .await;
+
+    // If the cached prefix already covers all messages, don't resume—otherwise we'd
+    // send an empty delta to Claude and get an empty response.
+    if history_prefix_len >= req.messages.len() {
+        println!(
+            "[cache lookup] cache covers entire request (len={}), disabling resume",
+            history_prefix_len
+        );
+        resume_session = None;
+        history_prefix_len = 0;
+    }
 
     let new_messages = if history_prefix_len > 0 {
         &req.messages[history_prefix_len..]
