@@ -43,10 +43,10 @@ Note: the runtime image now installs `nodejs` so that Node-based `claude` CLI bu
 ### Mounting credentials
 
 Where the CLI stores credentials (as of Nov 20, 2025):
-- **Linux:** file-based at `~/.claude/credentials.json` (preferred), sometimes `~/.claude/.credentials.json`, and occasionally `~/.config/claude/credentials.json` (older builds). citeturn0search3turn0search2
+- **Linux:** file-based at `~/.claude/credentials.json` (preferred), sometimes `~/.claude/.credentials.json`, and occasionally `~/.config/claude/credentials.json` (older builds).
 - **macOS:** stored in the Keychain under service `Claude Code-credentials` (recent builds) or `Claude Code` (some affected versions). Keys are not on disk by default. Export with:  
   `security find-generic-password -s "Claude Code-credentials" -w > ~/.claude/credentials.json`  
-  If that item doesn’t exist, try `Claude Code`. You can also run `claude /login` inside the container once to generate file-based creds. citeturn0search0turn0reddit14
+  If that item doesn’t exist, try `Claude Code`. You can also run `claude /login` inside the container once to generate file-based creds.
 
 Mount the binary, credential files, and set `HOME` so the gateway can reuse the login:
 
