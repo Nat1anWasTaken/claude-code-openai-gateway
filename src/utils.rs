@@ -176,8 +176,8 @@ mod tests {
     #[test]
     fn test_unix_timestamp() {
         let ts = unix_timestamp();
-        assert!(ts > 1_600_000_000); // After Sept 2020
-        assert!(ts < 2_000_000_000); // Before May 2033
+        assert!(ts > 1_600_000_000);
+        assert!(ts < 2_000_000_000);
     }
 
     #[test]
@@ -221,13 +221,11 @@ mod tests {
             },
         ];
         let hash = compute_message_hash(&messages);
-        assert_eq!(hash.len(), 64); // SHA-256 = 32 bytes = 64 hex chars
+        assert_eq!(hash.len(), 64);
 
-        // Same messages should produce same hash
         let hash2 = compute_message_hash(&messages);
         assert_eq!(hash, hash2);
 
-        // Different messages should produce different hash
         let messages2 = vec![OAChatMessage {
             role: "user".to_string(),
             content: json!("Different"),
@@ -292,7 +290,6 @@ mod tests {
         ];
 
         let (_, conversation) = flatten_messages(&messages);
-        // Tool messages should be ignored
         assert_eq!(conversation, "User: Hi");
     }
 }

@@ -83,14 +83,12 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     let conversation_hash = compute_message_hash(&req.messages);
     let (system_prompt, _) = flatten_messages(&req.messages);
 
-    // Find cached session for longest history prefix
     let (resume_session, history_prefix_len) = find_cached_prefix(
         |cut| compute_message_hash(&req.messages[..cut]),
         req.messages.len(),
     )
     .await;
 
-    // Determine which messages are new (not in cached history)
     let new_messages = if history_prefix_len > 0 {
         &req.messages[history_prefix_len..]
     } else {
@@ -99,11 +97,9 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
 
     let (_, prompt) = flatten_messages(new_messages);
 
-    // Build Claude CLI configuration
     let config = ClaudeCliConfig::new(prompt, system_prompt, req.model.clone())
         .with_resume_session(resume_session);
 
-    // Spawn Claude CLI process
     let mut child = spawn_claude_cli(&config)?;
 
     let stdout = child
@@ -179,7 +175,6 @@ async fn stream_claude_output(
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let mut session_id_seen: Option<String> = None;
 
-    // Send initial chunk with role
     let _ = tx
         .send(Ok(make_delta_event(
             &id,
@@ -207,7 +202,6 @@ async fn stream_claude_output(
                     }
                 }
 
-                // Check if this was a Result record (end of stream)
                 if matches!(
                     serde_json::from_str::<ClaudeRecord>(&line),
                     Ok(ClaudeRecord::Result { .. })
@@ -225,7 +219,6 @@ async fn stream_claude_output(
         }
     }
 
-    // Send final done event
     let _ = tx
         .send(Ok(make_done_event(&id, &model, created, None)))
         .await;
@@ -322,15 +315,12 @@ async fn process_non_streaming_request(
         }
     }
 
-    // Cache session if available
     if let Some(sid) = session_id_seen {
         store_session(conversation_hash, sid).await;
     }
 
-    // Collect stderr output
     let stderr_text = collect_stderr_output(stderr).await?;
 
-    // Wait for process to complete
     let status = child.wait().await?;
     if !status.success() {
         let msg = if stderr_text.is_empty() {
@@ -343,7 +333,6 @@ async fn process_non_streaming_request(
         eprintln!("claude stderr: {stderr_text}");
     }
 
-    // Build response
     let created = unix_timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let response = ChatCompletionResponse {
@@ -463,20 +452,16 @@ mod tests {
     #[test]
     fn test_make_delta_event_with_role() {
         let _event = make_delta_event("test-id", "test-model", 1234567890, Some("assistant"), "");
-        // Event is created successfully - detailed verification would require
-        // serializing the SSE format which is complex for unit tests
     }
 
     #[test]
     fn test_make_delta_event_with_text() {
         let _event = make_delta_event("test-id", "test-model", 1234567890, None, "Hello");
-        // Event is created successfully
     }
 
     #[test]
     fn test_make_done_event() {
         let _event = make_done_event("test-id", "test-model", 1234567890, None);
-        // Event is created successfully
     }
 
     #[test]

@@ -72,7 +72,6 @@ where
 {
     let cache = get_cache().lock().await;
 
-    // Search from longest to shortest, including the full conversation length
     for cut in (1..=total_messages).rev() {
         let hash = message_hashes(cut);
         if let Some(session_id) = cache.get(&hash) {
@@ -131,7 +130,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_cached_prefix_found() {
-        // Setup: cache a hash for prefix length 3
         store_session("found_prefix_3".to_string(), "session_3".to_string()).await;
 
         let hash_fn = |len: usize| format!("found_prefix_{}", len);
@@ -143,7 +141,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_cached_prefix_full_length_found() {
-        // Setup: cache the full conversation hash (length 4)
         store_session("full_prefix_4".to_string(), "session_4".to_string()).await;
 
         let hash_fn = |len: usize| format!("full_prefix_{}", len);

@@ -81,7 +81,6 @@ async fn shutdown_signal() {
             _ = int.recv() => {
                 println!("Received SIGINT, shutting down...");
             }
-            // Fallback for environments that still send Ctrl+C style signals.
             _ = signal::ctrl_c() => {
                 println!("Received Ctrl+C, shutting down...");
             }
@@ -90,7 +89,6 @@ async fn shutdown_signal() {
 
     #[cfg(not(unix))]
     {
-        // Best-effort shutdown on platforms without Unix signals.
         signal::ctrl_c().await.expect("install Ctrl+C handler");
         println!("Received Ctrl+C, shutting down...");
     }
