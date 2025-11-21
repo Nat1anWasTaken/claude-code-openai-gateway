@@ -1,7 +1,15 @@
 [package]
 name = "claude-code-openai-gateway"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "claude_code_openai_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "claude-code-openai-gateway"
+path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.7", features = ["macros", "json", "tokio"] }
