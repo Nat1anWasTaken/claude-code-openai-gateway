@@ -116,10 +116,7 @@ mod tests {
 
         {
             let guard = cache.lock().await;
-            assert_eq!(
-                guard.get("test_hash"),
-                Some(&"test_session".to_string())
-            );
+            assert_eq!(guard.get("test_hash"), Some(&"test_session".to_string()));
         }
     }
 

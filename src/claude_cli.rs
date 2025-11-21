@@ -153,32 +153,12 @@ pub fn build_claude_command(config: &ClaudeCliConfig) -> Command {
 pub fn spawn_claude_cli(config: &ClaudeCliConfig) -> Result<Child, GatewayError> {
     println!(
         "spawning claude: resume={} model={}",
-        config
-            .resume_session
-            .as_ref()
-            .map(|s| s.as_str())
-            .unwrap_or("<new>"),
+        config.resume_session.as_deref().unwrap_or("<new>"),
         config.model
     );
 
     let mut cmd = build_claude_command(config);
     cmd.spawn().map_err(GatewayError::Spawn)
-}
-
-/// Logs information about spawning a Claude CLI process.
-///
-/// # Arguments
-/// * `config` - The configuration being used
-pub fn log_spawn_info(config: &ClaudeCliConfig) {
-    println!(
-        "spawning claude: resume={} model={}",
-        config
-            .resume_session
-            .as_ref()
-            .map(|s| s.as_str())
-            .unwrap_or("<new>"),
-        config.model
-    );
 }
 
 #[cfg(test)]

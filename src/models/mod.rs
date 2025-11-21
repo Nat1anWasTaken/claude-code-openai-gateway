@@ -8,10 +8,3 @@
 pub mod claude;
 pub mod error;
 pub mod openai;
-
-pub use claude::{ClaudeRecord, ContentBlock, extract_text_from_contents};
-pub use error::GatewayError;
-pub use openai::{
-    ChatChoice, ChatCompletionResponse, ChatRequest, Delta, OAChatMessage, OAChatMessageOut,
-    StreamChoice, StreamDelta,
-};

@@ -154,7 +154,7 @@ mod tests {
         let req: ChatRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.model, "claude-3-5-sonnet-20241022");
         assert_eq!(req.messages.len(), 1);
-        assert_eq!(req.stream, false);
+        assert!(!req.stream);
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
         });
 
         let req: ChatRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.stream, true);
+        assert!(req.stream);
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub enum ClaudeRecord {
     SystemInit {
         /// Subtype of system message (e.g., "init")
         #[serde(rename = "subtype")]
+        #[allow(dead_code)]
         subtype: String,
 
         /// Session ID for resuming this conversation later
@@ -39,6 +40,7 @@ pub enum ClaudeRecord {
         message: ClaudeMessage,
 
         /// Associated session ID
+        #[allow(dead_code)]
         session_id: Option<String>,
     },
 
@@ -51,6 +53,7 @@ pub enum ClaudeRecord {
         event: StreamEvent,
 
         /// Associated session ID
+        #[allow(dead_code)]
         session_id: Option<String>,
     },
 
@@ -60,9 +63,11 @@ pub enum ClaudeRecord {
     #[serde(rename = "result")]
     Result {
         /// Subtype of result (e.g., "success", "error")
+        #[allow(dead_code)]
         subtype: String,
 
         /// Whether this result represents an error
+        #[allow(dead_code)]
         is_error: Option<bool>,
 
         /// Token usage and other statistics
@@ -106,6 +111,7 @@ pub enum ContentBlock {
 pub struct StreamEvent {
     /// Type of streaming event (e.g., "content_block_delta")
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub kind: String,
 
     /// Delta content, if this is a content update event
@@ -120,6 +126,7 @@ pub struct StreamEvent {
 pub struct EventDelta {
     /// Type of delta (e.g., "text_delta")
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub kind: String,
 
     /// Incremental text content
@@ -128,6 +135,7 @@ pub struct EventDelta {
 
     /// Incremental JSON content (for tool use)
     #[serde(default)]
+    #[allow(dead_code)]
     pub partial_json: Option<String>,
 }
 
@@ -177,7 +185,10 @@ mod tests {
 
         let record: ClaudeRecord = serde_json::from_value(json).unwrap();
         match record {
-            ClaudeRecord::SystemInit { subtype, session_id } => {
+            ClaudeRecord::SystemInit {
+                subtype,
+                session_id,
+            } => {
                 assert_eq!(subtype, "init");
                 assert_eq!(session_id, Some("test-session-123".to_string()));
             }
@@ -245,7 +256,11 @@ mod tests {
 
         let record: ClaudeRecord = serde_json::from_value(json).unwrap();
         match record {
-            ClaudeRecord::Result { subtype, is_error, usage } => {
+            ClaudeRecord::Result {
+                subtype,
+                is_error,
+                usage,
+            } => {
                 assert_eq!(subtype, "success");
                 assert_eq!(is_error, Some(false));
                 assert!(usage.is_some());

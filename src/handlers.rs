@@ -109,10 +109,7 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| GatewayError::Spawn(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "missing stdout",
-        )))?;
+        .ok_or_else(|| GatewayError::Spawn(std::io::Error::other("missing stdout")))?;
     let stderr = child.stderr.take();
 
     if req.stream {
@@ -156,7 +153,9 @@ async fn process_streaming_request(
             }
         });
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new()).into_response())
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::new())
+        .into_response())
 }
 
 /// Streams Claude CLI output as Server-Sent Events.
@@ -182,7 +181,13 @@ async fn stream_claude_output(
 
     // Send initial chunk with role
     let _ = tx
-        .send(Ok(make_delta_event(&id, &model, created, Some("assistant"), "")))
+        .send(Ok(make_delta_event(
+            &id,
+            &model,
+            created,
+            Some("assistant"),
+            "",
+        )))
         .await;
 
     while let Ok(Some(line)) = reader.next_line().await {
@@ -193,7 +198,9 @@ async fn stream_claude_output(
 
         match serde_json::from_str::<ClaudeRecord>(&line) {
             Ok(rec) => {
-                if let Some(event) = process_claude_record(rec, &id, &model, created, &mut session_id_seen) {
+                if let Some(event) =
+                    process_claude_record(rec, &id, &model, created, &mut session_id_seen)
+                {
                     if let Err(e) = tx.send(Ok(event)).await {
                         eprintln!("failed to send event: {e}");
                         break;
@@ -247,13 +254,10 @@ fn process_claude_record(
             *session_id_seen = session_id.or_else(|| session_id_seen.clone());
             None
         }
-        ClaudeRecord::StreamEvent { event, .. } => {
-            if let Some(text) = event.delta.and_then(|d| d.text) {
-                Some(make_delta_event(id, model, created, None, &text))
-            } else {
-                None
-            }
-        }
+        ClaudeRecord::StreamEvent { event, .. } => event
+            .delta
+            .and_then(|d| d.text)
+            .map(|text| make_delta_event(id, model, created, None, &text)),
         ClaudeRecord::Assistant { message, .. } => {
             let text = extract_text_from_contents(&message.content);
             if !text.is_empty() {
@@ -401,13 +405,7 @@ async fn collect_stderr_output(stderr: Option<ChildStderr>) -> Result<String, st
 ///
 /// # Returns
 /// SSE event with serialized StreamDelta
-fn make_delta_event(
-    id: &str,
-    model: &str,
-    created: u64,
-    role: Option<&str>,
-    text: &str,
-) -> Event {
+fn make_delta_event(id: &str, model: &str, created: u64, role: Option<&str>, text: &str) -> Event {
     let delta = StreamDelta {
         id: id.to_string(),
         object: "chat.completion.chunk".into(),

@@ -56,7 +56,5 @@ async fn main() {
     println!("Claude OpenAI Gateway listening on :8080");
     println!("Endpoint: POST http://localhost:8080/v1/chat/completions");
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    axum::serve(listener, app).await.expect("server error");
 }
