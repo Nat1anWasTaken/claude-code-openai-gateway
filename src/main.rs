@@ -32,7 +32,13 @@
 
 use axum::{routing::post, Router};
 use handlers::{handle_chat_completion, AppState};
+use http::header::HeaderName;
 use tokio::signal;
+use tower::ServiceBuilder;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::info;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -49,16 +55,34 @@ mod utils;
 /// chat completion requests.
 #[tokio::main]
 async fn main() {
+    init_tracing();
+
+    let x_request_id = HeaderName::from_static("x-request-id");
+
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completion))
-        .with_state(AppState {});
+        .with_state(AppState {})
+        .layer(
+            ServiceBuilder::new()
+                .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+                        .on_response(
+                            DefaultOnResponse::new()
+                                .level(tracing::Level::INFO)
+                                .latency_unit(tower_http::LatencyUnit::Millis),
+                        ),
+                )
+                .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid)),
+        );
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
         .await
         .expect("failed to bind to 0.0.0.0:8080");
 
-    println!("Claude OpenAI Gateway listening on :8080");
-    println!("Endpoint: POST http://localhost:8080/v1/chat/completions");
+    info!("Claude OpenAI Gateway listening on :8080");
+    info!("Endpoint: POST http://localhost:8080/v1/chat/completions");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -76,13 +100,13 @@ async fn shutdown_signal() {
 
         tokio::select! {
             _ = term.recv() => {
-                println!("Received SIGTERM, shutting down...");
+                info!("Received SIGTERM, shutting down...");
             }
             _ = int.recv() => {
-                println!("Received SIGINT, shutting down...");
+                info!("Received SIGINT, shutting down...");
             }
             _ = signal::ctrl_c() => {
-                println!("Received Ctrl+C, shutting down...");
+                info!("Received Ctrl+C, shutting down...");
             }
         }
     }
@@ -90,6 +114,20 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         signal::ctrl_c().await.expect("install Ctrl+C handler");
-        println!("Received Ctrl+C, shutting down...");
+        info!("Received Ctrl+C, shutting down...");
+    }
+}
+
+/// Initializes tracing subscriber with env-based level and format.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let fmt = std::env::var("TRACING_FMT").unwrap_or_default();
+    let builder = fmt::fmt().with_env_filter(filter).with_target(false);
+
+    if fmt.eq_ignore_ascii_case("json") {
+        builder.json().init();
+    } else {
+        builder.compact().init();
     }
 }

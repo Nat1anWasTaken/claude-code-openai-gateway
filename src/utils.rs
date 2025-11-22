@@ -34,40 +34,28 @@ pub fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Builds the exact string that gets hashed for conversation caching.
+///
+/// Format: `{role}:{text}\n` per message, where `text` is the plain text
+/// extracted from the message content.
+pub fn message_hash_material(messages: &[OAChatMessage]) -> String {
+    let mut material = String::new();
+    for msg in messages {
+        material.push_str(&msg.role);
+        material.push(':');
+        material.push_str(&extract_text_from_value(&msg.content));
+        material.push('\n');
+    }
+    material
+}
+
 /// Computes a SHA-256 hash of a message array for caching purposes.
 ///
-/// Creates a deterministic hash by concatenating role and content
-/// of each message, separated by colons and newlines.
-///
-/// # Arguments
-/// * `messages` - Slice of OpenAI chat messages to hash
-///
-/// # Returns
-/// Hex-encoded SHA-256 hash of the messages
-///
-/// # Examples
-/// ```
-/// use claude_code_openai_gateway::utils::compute_message_hash;
-/// use claude_code_openai_gateway::models::openai::OAChatMessage;
-/// use serde_json::json;
-///
-/// let messages = vec![
-///     OAChatMessage {
-///         role: "user".to_string(),
-///         content: json!("Hello"),
-///     },
-/// ];
-/// let hash = compute_message_hash(&messages);
-/// assert_eq!(hash.len(), 64); // SHA-256 produces 64 hex chars
-/// ```
+/// Deterministic because it hashes the output of `message_hash_material`.
 pub fn compute_message_hash(messages: &[OAChatMessage]) -> String {
+    let material = message_hash_material(messages);
     let mut hasher = Sha256::new();
-    for msg in messages {
-        hasher.update(msg.role.as_bytes());
-        hasher.update(b":");
-        hasher.update(extract_text_from_value(&msg.content).as_bytes());
-        hasher.update(b"\n");
-    }
+    hasher.update(material.as_bytes());
     hex_encode(hasher.finalize())
 }
 

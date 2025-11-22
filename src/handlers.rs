@@ -13,9 +13,9 @@ use crate::models::openai::{
     ChatChoice, ChatCompletionResponse, ChatRequest, Delta, OAChatMessageOut, StreamChoice,
     StreamDelta,
 };
-use crate::utils::{compute_message_hash, flatten_messages, unix_timestamp};
+use crate::utils::{compute_message_hash, flatten_messages, message_hash_material, unix_timestamp};
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     http::StatusCode,
     response::{sse::Event, sse::KeepAlive, IntoResponse, Response, Sse},
     Json,
@@ -29,6 +29,8 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tower_http::request_id::RequestId;
+use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use uuid::Uuid;
 
 /// Application state (currently empty, reserved for future use).
@@ -48,12 +50,21 @@ pub struct AppState {}
 /// HTTP response with either streaming SSE or complete JSON
 pub async fn handle_chat_completion(
     State(_state): State<AppState>,
+    Extension(req_id_ext): Extension<RequestId>,
     Json(req): Json<ChatRequest>,
 ) -> Response {
-    match process_chat_request(req).await {
+    let req_id = req_id_ext
+        .header_value()
+        .to_str()
+        .ok()
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let span = info_span!("request", req_id = %req_id, model = %req.model, stream = req.stream, messages = req.messages.len());
+
+    match process_chat_request(req, req_id).instrument(span).await {
         Ok(resp) => resp,
         Err(err) => {
-            eprintln!("handler error: {err:?}");
+            error!(error = ?err, "handler error");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
     }
@@ -72,29 +83,41 @@ pub async fn handle_chat_completion(
 ///
 /// # Errors
 /// Returns `GatewayError` if Claude CLI fails or produces invalid output
-async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError> {
-    println!(
-        "incoming request: model={} stream={} messages={}",
-        req.model,
-        req.stream,
-        req.messages.len()
-    );
+async fn process_chat_request(req: ChatRequest, req_id: String) -> Result<Response, GatewayError> {
+    info!("incoming request");
 
     let conversation_hash = compute_message_hash(&req.messages);
+    debug!(conversation_hash = %conversation_hash, "computed conversation hash");
+    trace!(material = %message_hash_material(&req.messages).replace('\n', "\\n"), "conversation hash material");
     let (system_prompt, _) = flatten_messages(&req.messages);
 
-    let (found_session, history_prefix_len) = find_cached_prefix(
-        |cut| compute_message_hash(&req.messages[..cut]),
+    let (mut resume_session, mut history_prefix_len) = find_cached_prefix(
+        |cut| {
+            let hash = compute_message_hash(&req.messages[..cut]);
+            trace!(prefix_len = cut, hash = %hash, "cache lookup candidate");
+            hash
+        },
         req.messages.len(),
     )
     .await;
 
-    let exact_match = history_prefix_len == req.messages.len();
-    let resume_session = if exact_match { None } else { found_session };
+    // If the cached prefix already covers all messages, don't resume—otherwise we'd
+    // send an empty delta to Claude and get an empty response.
+    if history_prefix_len >= req.messages.len() {
+        debug!(
+            history_prefix_len,
+            "cache covers entire request, disabling resume"
+        );
+        resume_session = None;
+        history_prefix_len = 0;
+    }
 
-    let new_messages = if exact_match {
-        &req.messages[..]
-    } else if history_prefix_len > 0 {
+    info!(
+        cache_resume = resume_session.as_deref().unwrap_or("<none>"),
+        history_prefix_len, "cache decision"
+    );
+
+    let new_messages = if history_prefix_len > 0 {
         &req.messages[history_prefix_len..]
     } else {
         &req.messages[..]
@@ -103,7 +126,7 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     let (_, prompt) = flatten_messages(new_messages);
 
     let config = ClaudeCliConfig::new(prompt, system_prompt, req.model.clone())
-        .with_resume_session(resume_session);
+        .with_resume_session(resume_session.clone());
 
     let mut child = spawn_claude_cli(&config)?;
 
@@ -114,9 +137,10 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     let stderr = child.stderr.take();
 
     if req.stream {
-        process_streaming_request(stdout, stderr, req.model, conversation_hash).await
+        process_streaming_request(stdout, stderr, req.model, conversation_hash, req_id).await
     } else {
-        process_non_streaming_request(stdout, stderr, child, req.model, conversation_hash).await
+        process_non_streaming_request(stdout, stderr, child, req.model, conversation_hash, req_id)
+            .await
     }
 }
 
@@ -138,11 +162,12 @@ async fn process_streaming_request(
     _stderr: Option<ChildStderr>,
     model: String,
     conversation_hash: String,
+    req_id: String,
 ) -> Result<Response, GatewayError> {
     let (tx, rx) = mpsc::channel::<Result<Event, GatewayError>>(16);
 
     tokio::spawn(async move {
-        stream_claude_output(stdout, tx, model, conversation_hash).await;
+        stream_claude_output(stdout, tx, model, conversation_hash, req_id).await;
     });
 
     let stream = ReceiverStream::new(rx)
@@ -174,11 +199,13 @@ async fn stream_claude_output(
     tx: mpsc::Sender<Result<Event, GatewayError>>,
     model: String,
     conversation_hash: String,
+    req_id: String,
 ) {
     let mut reader = BufReader::new(stdout).lines();
     let created = unix_timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let mut session_id_seen: Option<String> = None;
+    let mut chunks_sent = 0usize;
 
     let _ = tx
         .send(Ok(make_delta_event(
@@ -194,7 +221,7 @@ async fn stream_claude_output(
         if line.trim().is_empty() {
             continue;
         }
-        println!("[claude stdout stream] {line}");
+        trace!(%req_id, raw = %line, "claude stdout");
 
         match serde_json::from_str::<ClaudeRecord>(&line) {
             Ok(rec) => {
@@ -202,9 +229,10 @@ async fn stream_claude_output(
                     process_claude_record(rec, &id, &model, created, &mut session_id_seen)
                 {
                     if let Err(e) = tx.send(Ok(event)).await {
-                        eprintln!("failed to send event: {e}");
+                        warn!(%req_id, error = %e, "failed to send SSE event");
                         break;
                     }
+                    chunks_sent += 1;
                 }
 
                 if matches!(
@@ -227,6 +255,8 @@ async fn stream_claude_output(
     let _ = tx
         .send(Ok(make_done_event(&id, &model, created, None)))
         .await;
+
+    info!(%req_id, chunks_sent, "streaming response finished");
 }
 
 /// Processes a single Claude CLI record and converts it to an SSE event.
@@ -292,6 +322,7 @@ async fn process_non_streaming_request(
     mut child: tokio::process::Child,
     model: String,
     conversation_hash: String,
+    req_id: String,
 ) -> Result<Response, GatewayError> {
     let mut reader = BufReader::new(stdout).lines();
     let mut final_text = String::new();
@@ -302,7 +333,7 @@ async fn process_non_streaming_request(
         if line.trim().is_empty() {
             continue;
         }
-        println!("[claude stdout collect] {line}");
+        trace!(%req_id, raw = %line, "claude stdout");
 
         if let Ok(rec) = serde_json::from_str::<ClaudeRecord>(&line) {
             match rec {
@@ -335,8 +366,10 @@ async fn process_non_streaming_request(
         };
         return Err(GatewayError::Cli(msg));
     } else if !stderr_text.is_empty() {
-        eprintln!("claude stderr: {stderr_text}");
+        warn!(%req_id, stderr = %stderr_text, "claude stderr");
     }
+
+    info!(%req_id, chars = final_text.len(), usage_present = usage.is_some(), "non-stream response ready");
 
     let created = unix_timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
@@ -400,7 +433,34 @@ async fn collect_stderr_output(stderr: Option<ChildStderr>) -> Result<String, st
 /// # Returns
 /// SSE event with serialized StreamDelta
 fn make_delta_event(id: &str, model: &str, created: u64, role: Option<&str>, text: &str) -> Event {
-    let delta = StreamDelta {
+    let delta = build_delta_payload(id, model, created, role, text);
+    Event::default().data(serde_json::to_string(&delta).unwrap())
+}
+
+/// Creates a Server-Sent Event indicating completion.
+///
+/// # Arguments
+/// * `id` - Completion ID
+/// * `model` - Model identifier
+/// * `created` - Unix timestamp
+/// * `_usage` - Optional usage statistics (currently unused)
+///
+/// # Returns
+/// SSE event with finish_reason set to "stop"
+fn make_done_event(id: &str, model: &str, created: u64, _usage: Option<Value>) -> Event {
+    let delta = build_done_payload(id, model, created);
+    Event::default().data(serde_json::to_string(&delta).unwrap())
+}
+
+/// Builds the JSON payload for a delta event (shared by tests).
+fn build_delta_payload(
+    id: &str,
+    model: &str,
+    created: u64,
+    role: Option<&str>,
+    text: &str,
+) -> StreamDelta {
+    StreamDelta {
         id: id.to_string(),
         object: "chat.completion.chunk".into(),
         created,
@@ -417,42 +477,38 @@ fn make_delta_event(id: &str, model: &str, created: u64, role: Option<&str>, tex
             },
             finish_reason: None,
         }],
-    };
-    Event::default().data(serde_json::to_string(&delta).unwrap())
+    }
 }
 
-/// Creates a Server-Sent Event indicating completion.
-///
-/// # Arguments
-/// * `id` - Completion ID
-/// * `model` - Model identifier
-/// * `created` - Unix timestamp
-/// * `_usage` - Optional usage statistics (currently unused)
-///
-/// # Returns
-/// SSE event with finish_reason set to "stop"
-fn make_done_event(id: &str, model: &str, created: u64, _usage: Option<Value>) -> Event {
-    let choice = StreamChoice {
-        index: 0,
-        delta: Delta {
-            role: None,
-            content: None,
-        },
-        finish_reason: Some("stop".into()),
-    };
-    let delta = StreamDelta {
+/// Builds the JSON payload for the terminal done event (shared by tests).
+fn build_done_payload(id: &str, model: &str, created: u64) -> StreamDelta {
+    StreamDelta {
         id: id.to_string(),
         object: "chat.completion.chunk".into(),
         created,
         model: model.to_string(),
-        choices: vec![choice],
-    };
-    Event::default().data(serde_json::to_string(&delta).unwrap())
+        choices: vec![StreamChoice {
+            index: 0,
+            delta: Delta {
+                role: None,
+                content: None,
+            },
+            finish_reason: Some("stop".into()),
+        }],
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::clear_cache;
+    use axum::response::sse::Sse;
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use std::convert::Infallible;
+    use std::time::Duration;
+    use tokio::process::Command;
+    use tokio::time::timeout;
 
     #[test]
     fn test_make_delta_event_with_role() {
@@ -467,6 +523,124 @@ mod tests {
     #[test]
     fn test_make_done_event() {
         let _event = make_done_event("test-id", "test-model", 1234567890, None);
+    }
+
+    #[test]
+    fn test_build_delta_payload_json_shape() {
+        let delta = build_delta_payload("id", "m", 42, Some("assistant"), "hello");
+        assert_eq!(delta.object, "chat.completion.chunk");
+        assert_eq!(delta.choices.len(), 1);
+        let choice = &delta.choices[0];
+        assert_eq!(choice.delta.role.as_deref(), Some("assistant"));
+        assert_eq!(choice.delta.content.as_deref(), Some("hello"));
+        assert!(choice.finish_reason.is_none());
+    }
+
+    #[test]
+    fn test_build_done_payload_has_stop_reason() {
+        let delta = build_done_payload("id", "m", 42);
+        assert_eq!(delta.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert!(delta.choices[0].delta.role.is_none());
+        assert!(delta.choices[0].delta.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_claude_output_emits_events_and_caches_session() {
+        clear_cache().await;
+
+        // Fake Claude stdout with init -> stream delta -> result lines.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf '%s\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-1\"}' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn fake claude");
+
+        let stdout = child
+            .stdout
+            .take()
+            .expect("missing stdout from fake claude");
+
+        let (tx, mut rx) = mpsc::channel::<Result<Event, GatewayError>>(8);
+        let handle = tokio::spawn(stream_claude_output(
+            stdout,
+            tx,
+            "test-model".into(),
+            "conv-hash".into(),
+            "req-123".into(),
+        ));
+
+        let mut payloads = Vec::new();
+        while let Some(evt) = rx.recv().await {
+            let data = extract_sse_data(evt.unwrap()).await;
+            payloads.push(data);
+        }
+        handle.await.unwrap();
+        timeout(Duration::from_secs(1), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First event is role bootstrap, second is streamed text, last is done.
+        let first: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
+        assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+        let streamed: serde_json::Value = serde_json::from_str(&payloads[1]).unwrap();
+        assert_eq!(streamed["choices"][0]["delta"]["content"], "hello");
+
+        let cache = crate::cache::get_cache().lock().await;
+        assert_eq!(cache.get("conv-hash"), Some(&"sid-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_process_non_streaming_request_collects_usage_and_caches() {
+        clear_cache().await;
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf '%s\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-2\"}' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi there\"}]}}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"output_tokens\":5}}'")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn fake claude");
+
+        let stdout = child
+            .stdout
+            .take()
+            .expect("missing stdout from fake claude");
+
+        let response = process_non_streaming_request(
+            stdout,
+            None,
+            child,
+            "test-model".into(),
+            "hash-usage".into(),
+            "req-usage".into(),
+        )
+        .await
+        .expect("non-streaming request failed");
+
+        let collected = BodyExt::collect(response.into_body()).await.unwrap();
+        let body = String::from_utf8(collected.to_bytes().to_vec()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["choices"][0]["message"]["content"], "hi there");
+        assert_eq!(json["model"], "test-model");
+        assert_eq!(json["usage"]["output_tokens"], 5);
+
+        let cache = crate::cache::get_cache().lock().await;
+        assert_eq!(cache.get("hash-usage"), Some(&"sid-2".to_string()));
+    }
+
+    async fn extract_sse_data(event: Event) -> String {
+        let stream = futures::stream::once(async { Ok::<_, Infallible>(event) });
+        let response = Sse::new(stream).into_response();
+        let collected = BodyExt::collect(response.into_body()).await.unwrap();
+        let bytes: Bytes = collected.to_bytes();
+        // SSE format: data: <payload>\n\n
+        for line in String::from_utf8(bytes.to_vec()).unwrap().lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                return data.to_string();
+            }
+        }
+        panic!("no data line in SSE event");
     }
 
     #[test]
