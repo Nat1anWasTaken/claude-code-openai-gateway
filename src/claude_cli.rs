@@ -201,8 +201,22 @@ mod tests {
         );
 
         let cmd = build_claude_command(&config);
-        let program = cmd.as_std().get_program();
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program();
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
         assert_eq!(program, "claude");
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], "test");
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"model".to_string()));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--system-prompt".to_string()));
     }
 
     #[test]
@@ -217,5 +231,17 @@ mod tests {
         let cmd = build_claude_command(&config);
         let program = cmd.as_std().get_program();
         assert_eq!(program, "claude");
+
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        let resume_pos = args
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("missing --resume flag");
+        assert_eq!(args.get(resume_pos + 1), Some(&"session-abc".to_string()));
     }
 }

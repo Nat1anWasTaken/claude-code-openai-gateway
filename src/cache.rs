@@ -102,12 +102,22 @@ pub async fn store_session(conversation_hash: String, session_id: String) {
     cache.insert(conversation_hash, session_id);
 }
 
+/// Clears the in-memory cache (test-only helper).
+#[cfg(test)]
+pub async fn clear_cache() {
+    let mut cache = get_cache().lock().await;
+    cache.clear();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{clear_cache, find_cached_prefix, get_cache, store_session};
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_cache_store_and_retrieve() {
+        clear_cache().await;
         let cache = get_cache();
         {
             let mut guard = cache.lock().await;
@@ -121,7 +131,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_store_session() {
+        clear_cache().await;
         store_session("hash1".to_string(), "session1".to_string()).await;
 
         let cache = get_cache().lock().await;
@@ -129,7 +141,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_find_cached_prefix_found() {
+        clear_cache().await;
         store_session("found_prefix_3".to_string(), "session_3".to_string()).await;
 
         let hash_fn = |len: usize| format!("found_prefix_{}", len);
@@ -140,7 +154,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_find_cached_prefix_full_length_found() {
+        clear_cache().await;
         store_session("full_prefix_4".to_string(), "session_4".to_string()).await;
 
         let hash_fn = |len: usize| format!("full_prefix_{}", len);
@@ -151,11 +167,30 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_find_cached_prefix_not_found() {
+        clear_cache().await;
         let hash_fn = |len: usize| format!("nonexistent_{}", len);
         let (session_id, prefix_len) = find_cached_prefix(hash_fn, 5).await;
 
         assert_eq!(session_id, None);
         assert_eq!(prefix_len, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_concurrent_stores() {
+        clear_cache().await;
+        let tasks = (0..10).map(|i| {
+            let hash = format!("h{}", i);
+            let sid = format!("s{}", i);
+            tokio::spawn(store_session(hash, sid))
+        });
+        futures::future::join_all(tasks).await;
+
+        let cache = get_cache().lock().await;
+        for i in 0..10 {
+            assert_eq!(cache.get(&format!("h{}", i)), Some(&format!("s{}", i)));
+        }
     }
 }

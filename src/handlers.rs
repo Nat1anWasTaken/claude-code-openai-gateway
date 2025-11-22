@@ -433,7 +433,34 @@ async fn collect_stderr_output(stderr: Option<ChildStderr>) -> Result<String, st
 /// # Returns
 /// SSE event with serialized StreamDelta
 fn make_delta_event(id: &str, model: &str, created: u64, role: Option<&str>, text: &str) -> Event {
-    let delta = StreamDelta {
+    let delta = build_delta_payload(id, model, created, role, text);
+    Event::default().data(serde_json::to_string(&delta).unwrap())
+}
+
+/// Creates a Server-Sent Event indicating completion.
+///
+/// # Arguments
+/// * `id` - Completion ID
+/// * `model` - Model identifier
+/// * `created` - Unix timestamp
+/// * `_usage` - Optional usage statistics (currently unused)
+///
+/// # Returns
+/// SSE event with finish_reason set to "stop"
+fn make_done_event(id: &str, model: &str, created: u64, _usage: Option<Value>) -> Event {
+    let delta = build_done_payload(id, model, created);
+    Event::default().data(serde_json::to_string(&delta).unwrap())
+}
+
+/// Builds the JSON payload for a delta event (shared by tests).
+fn build_delta_payload(
+    id: &str,
+    model: &str,
+    created: u64,
+    role: Option<&str>,
+    text: &str,
+) -> StreamDelta {
+    StreamDelta {
         id: id.to_string(),
         object: "chat.completion.chunk".into(),
         created,
@@ -450,42 +477,38 @@ fn make_delta_event(id: &str, model: &str, created: u64, role: Option<&str>, tex
             },
             finish_reason: None,
         }],
-    };
-    Event::default().data(serde_json::to_string(&delta).unwrap())
+    }
 }
 
-/// Creates a Server-Sent Event indicating completion.
-///
-/// # Arguments
-/// * `id` - Completion ID
-/// * `model` - Model identifier
-/// * `created` - Unix timestamp
-/// * `_usage` - Optional usage statistics (currently unused)
-///
-/// # Returns
-/// SSE event with finish_reason set to "stop"
-fn make_done_event(id: &str, model: &str, created: u64, _usage: Option<Value>) -> Event {
-    let choice = StreamChoice {
-        index: 0,
-        delta: Delta {
-            role: None,
-            content: None,
-        },
-        finish_reason: Some("stop".into()),
-    };
-    let delta = StreamDelta {
+/// Builds the JSON payload for the terminal done event (shared by tests).
+fn build_done_payload(id: &str, model: &str, created: u64) -> StreamDelta {
+    StreamDelta {
         id: id.to_string(),
         object: "chat.completion.chunk".into(),
         created,
         model: model.to_string(),
-        choices: vec![choice],
-    };
-    Event::default().data(serde_json::to_string(&delta).unwrap())
+        choices: vec![StreamChoice {
+            index: 0,
+            delta: Delta {
+                role: None,
+                content: None,
+            },
+            finish_reason: Some("stop".into()),
+        }],
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::response::sse::Sse;
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use std::time::Duration;
+    use std::convert::Infallible;
+    use tokio::process::Command;
+    use tokio::time::timeout;
     use super::*;
+    use crate::cache::clear_cache;
 
     #[test]
     fn test_make_delta_event_with_role() {
@@ -500,6 +523,124 @@ mod tests {
     #[test]
     fn test_make_done_event() {
         let _event = make_done_event("test-id", "test-model", 1234567890, None);
+    }
+
+    #[test]
+    fn test_build_delta_payload_json_shape() {
+        let delta = build_delta_payload("id", "m", 42, Some("assistant"), "hello");
+        assert_eq!(delta.object, "chat.completion.chunk");
+        assert_eq!(delta.choices.len(), 1);
+        let choice = &delta.choices[0];
+        assert_eq!(choice.delta.role.as_deref(), Some("assistant"));
+        assert_eq!(choice.delta.content.as_deref(), Some("hello"));
+        assert!(choice.finish_reason.is_none());
+    }
+
+    #[test]
+    fn test_build_done_payload_has_stop_reason() {
+        let delta = build_done_payload("id", "m", 42);
+        assert_eq!(delta.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert!(delta.choices[0].delta.role.is_none());
+        assert!(delta.choices[0].delta.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_claude_output_emits_events_and_caches_session() {
+        clear_cache().await;
+
+        // Fake Claude stdout with init -> stream delta -> result lines.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf '%s\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-1\"}' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn fake claude");
+
+        let stdout = child
+            .stdout
+            .take()
+            .expect("missing stdout from fake claude");
+
+        let (tx, mut rx) = mpsc::channel::<Result<Event, GatewayError>>(8);
+        let handle = tokio::spawn(stream_claude_output(
+            stdout,
+            tx,
+            "test-model".into(),
+            "conv-hash".into(),
+            "req-123".into(),
+        ));
+
+        let mut payloads = Vec::new();
+        while let Some(evt) = rx.recv().await {
+            let data = extract_sse_data(evt.unwrap()).await;
+            payloads.push(data);
+        }
+        handle.await.unwrap();
+        timeout(Duration::from_secs(1), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First event is role bootstrap, second is streamed text, last is done.
+        let first: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
+        assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+        let streamed: serde_json::Value = serde_json::from_str(&payloads[1]).unwrap();
+        assert_eq!(streamed["choices"][0]["delta"]["content"], "hello");
+
+        let cache = crate::cache::get_cache().lock().await;
+        assert_eq!(cache.get("conv-hash"), Some(&"sid-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_process_non_streaming_request_collects_usage_and_caches() {
+        clear_cache().await;
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf '%s\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-2\"}' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi there\"}]}}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"output_tokens\":5}}'")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn fake claude");
+
+        let stdout = child
+            .stdout
+            .take()
+            .expect("missing stdout from fake claude");
+
+        let response = process_non_streaming_request(
+            stdout,
+            None,
+            child,
+            "test-model".into(),
+            "hash-usage".into(),
+            "req-usage".into(),
+        )
+        .await
+        .expect("non-streaming request failed");
+
+        let collected = BodyExt::collect(response.into_body()).await.unwrap();
+        let body = String::from_utf8(collected.to_bytes().to_vec()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["choices"][0]["message"]["content"], "hi there");
+        assert_eq!(json["model"], "test-model");
+        assert_eq!(json["usage"]["output_tokens"], 5);
+
+        let cache = crate::cache::get_cache().lock().await;
+        assert_eq!(cache.get("hash-usage"), Some(&"sid-2".to_string()));
+    }
+
+    async fn extract_sse_data(event: Event) -> String {
+        let stream = futures::stream::once(async { Ok::<_, Infallible>(event) });
+        let response = Sse::new(stream).into_response();
+        let collected = BodyExt::collect(response.into_body()).await.unwrap();
+        let bytes: Bytes = collected.to_bytes();
+        // SSE format: data: <payload>\n\n
+        for line in String::from_utf8(bytes.to_vec()).unwrap().lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                return data.to_string();
+            }
+        }
+        panic!("no data line in SSE event");
     }
 
     #[test]
