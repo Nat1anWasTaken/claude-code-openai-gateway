@@ -13,11 +13,9 @@ use crate::models::openai::{
     ChatChoice, ChatCompletionResponse, ChatRequest, Delta, OAChatMessageOut, StreamChoice,
     StreamDelta,
 };
-use crate::utils::{
-    compute_message_hash, flatten_messages, message_hash_material, unix_timestamp,
-};
+use crate::utils::{compute_message_hash, flatten_messages, message_hash_material, unix_timestamp};
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     http::StatusCode,
     response::{sse::Event, sse::KeepAlive, IntoResponse, Response, Sse},
     Json,
@@ -31,6 +29,8 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tower_http::request_id::RequestId;
+use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use uuid::Uuid;
 
 /// Application state (currently empty, reserved for future use).
@@ -50,12 +50,21 @@ pub struct AppState {}
 /// HTTP response with either streaming SSE or complete JSON
 pub async fn handle_chat_completion(
     State(_state): State<AppState>,
+    Extension(req_id_ext): Extension<RequestId>,
     Json(req): Json<ChatRequest>,
 ) -> Response {
-    match process_chat_request(req).await {
+    let req_id = req_id_ext
+        .header_value()
+        .to_str()
+        .ok()
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let span = info_span!("request", req_id = %req_id, model = %req.model, stream = req.stream, messages = req.messages.len());
+
+    match process_chat_request(req, req_id).instrument(span).await {
         Ok(resp) => resp,
         Err(err) => {
-            eprintln!("handler error: {err:?}");
+            error!(error = ?err, "handler error");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
     }
@@ -74,39 +83,18 @@ pub async fn handle_chat_completion(
 ///
 /// # Errors
 /// Returns `GatewayError` if Claude CLI fails or produces invalid output
-async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError> {
-    println!(
-        "incoming request: model={} stream={} messages={}",
-        req.model,
-        req.stream,
-        req.messages.len()
-    );
+async fn process_chat_request(req: ChatRequest, req_id: String) -> Result<Response, GatewayError> {
+    info!("incoming request");
 
     let conversation_hash = compute_message_hash(&req.messages);
-    println!("[cache hashing] full conversation hash={conversation_hash}");
-    let material_full = message_hash_material(&req.messages);
-    println!(
-        "[cache hashing] full material bytes={} preview=\"{}\"",
-        material_full.len(),
-        material_full.replace('\n', "\\n")
-    );
-    for (idx, _) in req.messages.iter().enumerate() {
-        let slice = &req.messages[..=idx];
-        let h = compute_message_hash(slice);
-        let mat = message_hash_material(slice);
-        println!(
-            "[cache hashing] prefix_len={} hash={} material=\"{}\"",
-            idx + 1,
-            h,
-            mat.replace('\n', "\\n")
-        );
-    }
+    debug!(conversation_hash = %conversation_hash, "computed conversation hash");
+    trace!(material = %message_hash_material(&req.messages).replace('\n', "\\n"), "conversation hash material");
     let (system_prompt, _) = flatten_messages(&req.messages);
 
     let (mut resume_session, mut history_prefix_len) = find_cached_prefix(
         |cut| {
             let hash = compute_message_hash(&req.messages[..cut]);
-            println!("[cache lookup] querying prefix_len={cut} hash={hash}");
+            trace!(prefix_len = cut, hash = %hash, "cache lookup candidate");
             hash
         },
         req.messages.len(),
@@ -116,13 +104,18 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     // If the cached prefix already covers all messages, don't resume—otherwise we'd
     // send an empty delta to Claude and get an empty response.
     if history_prefix_len >= req.messages.len() {
-        println!(
-            "[cache lookup] cache covers entire request (len={}), disabling resume",
-            history_prefix_len
+        debug!(
+            history_prefix_len,
+            "cache covers entire request, disabling resume"
         );
         resume_session = None;
         history_prefix_len = 0;
     }
+
+    info!(
+        cache_resume = resume_session.as_deref().unwrap_or("<none>"),
+        history_prefix_len, "cache decision"
+    );
 
     let new_messages = if history_prefix_len > 0 {
         &req.messages[history_prefix_len..]
@@ -133,7 +126,7 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     let (_, prompt) = flatten_messages(new_messages);
 
     let config = ClaudeCliConfig::new(prompt, system_prompt, req.model.clone())
-        .with_resume_session(resume_session);
+        .with_resume_session(resume_session.clone());
 
     let mut child = spawn_claude_cli(&config)?;
 
@@ -144,9 +137,10 @@ async fn process_chat_request(req: ChatRequest) -> Result<Response, GatewayError
     let stderr = child.stderr.take();
 
     if req.stream {
-        process_streaming_request(stdout, stderr, req.model, conversation_hash).await
+        process_streaming_request(stdout, stderr, req.model, conversation_hash, req_id).await
     } else {
-        process_non_streaming_request(stdout, stderr, child, req.model, conversation_hash).await
+        process_non_streaming_request(stdout, stderr, child, req.model, conversation_hash, req_id)
+            .await
     }
 }
 
@@ -168,11 +162,12 @@ async fn process_streaming_request(
     _stderr: Option<ChildStderr>,
     model: String,
     conversation_hash: String,
+    req_id: String,
 ) -> Result<Response, GatewayError> {
     let (tx, rx) = mpsc::channel::<Result<Event, GatewayError>>(16);
 
     tokio::spawn(async move {
-        stream_claude_output(stdout, tx, model, conversation_hash).await;
+        stream_claude_output(stdout, tx, model, conversation_hash, req_id).await;
     });
 
     let stream = ReceiverStream::new(rx)
@@ -204,11 +199,13 @@ async fn stream_claude_output(
     tx: mpsc::Sender<Result<Event, GatewayError>>,
     model: String,
     conversation_hash: String,
+    req_id: String,
 ) {
     let mut reader = BufReader::new(stdout).lines();
     let created = unix_timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let mut session_id_seen: Option<String> = None;
+    let mut chunks_sent = 0usize;
 
     let _ = tx
         .send(Ok(make_delta_event(
@@ -224,7 +221,7 @@ async fn stream_claude_output(
         if line.trim().is_empty() {
             continue;
         }
-        println!("[claude stdout stream] {line}");
+        trace!(%req_id, raw = %line, "claude stdout");
 
         match serde_json::from_str::<ClaudeRecord>(&line) {
             Ok(rec) => {
@@ -232,9 +229,10 @@ async fn stream_claude_output(
                     process_claude_record(rec, &id, &model, created, &mut session_id_seen)
                 {
                     if let Err(e) = tx.send(Ok(event)).await {
-                        eprintln!("failed to send event: {e}");
+                        warn!(%req_id, error = %e, "failed to send SSE event");
                         break;
                     }
+                    chunks_sent += 1;
                 }
 
                 if matches!(
@@ -257,6 +255,8 @@ async fn stream_claude_output(
     let _ = tx
         .send(Ok(make_done_event(&id, &model, created, None)))
         .await;
+
+    info!(%req_id, chunks_sent, "streaming response finished");
 }
 
 /// Processes a single Claude CLI record and converts it to an SSE event.
@@ -322,6 +322,7 @@ async fn process_non_streaming_request(
     mut child: tokio::process::Child,
     model: String,
     conversation_hash: String,
+    req_id: String,
 ) -> Result<Response, GatewayError> {
     let mut reader = BufReader::new(stdout).lines();
     let mut final_text = String::new();
@@ -332,7 +333,7 @@ async fn process_non_streaming_request(
         if line.trim().is_empty() {
             continue;
         }
-        println!("[claude stdout collect] {line}");
+        trace!(%req_id, raw = %line, "claude stdout");
 
         if let Ok(rec) = serde_json::from_str::<ClaudeRecord>(&line) {
             match rec {
@@ -365,8 +366,10 @@ async fn process_non_streaming_request(
         };
         return Err(GatewayError::Cli(msg));
     } else if !stderr_text.is_empty() {
-        eprintln!("claude stderr: {stderr_text}");
+        warn!(%req_id, stderr = %stderr_text, "claude stderr");
     }
+
+    info!(%req_id, chars = final_text.len(), usage_present = usage.is_some(), "non-stream response ready");
 
     let created = unix_timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4());

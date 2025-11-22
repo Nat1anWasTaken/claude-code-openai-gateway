@@ -8,6 +8,7 @@
 use crate::models::error::GatewayError;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
+use tracing::info;
 
 /// Configuration for spawning a Claude CLI process.
 #[derive(Debug, Clone)]
@@ -151,10 +152,10 @@ pub fn build_claude_command(config: &ClaudeCliConfig) -> Command {
 /// }
 /// ```
 pub fn spawn_claude_cli(config: &ClaudeCliConfig) -> Result<Child, GatewayError> {
-    println!(
-        "spawning claude: resume={} model={}",
-        config.resume_session.as_deref().unwrap_or("<new>"),
-        config.model
+    info!(
+        resume = config.resume_session.as_deref().unwrap_or("<new>"),
+        model = %config.model,
+        "spawning claude"
     );
 
     let mut cmd = build_claude_command(config);
