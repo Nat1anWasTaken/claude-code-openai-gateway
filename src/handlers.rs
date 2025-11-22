@@ -500,15 +500,15 @@ fn build_done_payload(id: &str, model: &str, created: u64) -> StreamDelta {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::cache::clear_cache;
     use axum::response::sse::Sse;
     use bytes::Bytes;
     use http_body_util::BodyExt;
-    use std::time::Duration;
     use std::convert::Infallible;
+    use std::time::Duration;
     use tokio::process::Command;
     use tokio::time::timeout;
-    use super::*;
-    use crate::cache::clear_cache;
 
     #[test]
     fn test_make_delta_event_with_role() {
