@@ -127,14 +127,9 @@ async fn process_chat_request(req: ChatRequest, req_id: String) -> Result<Respon
     };
 
     let (_, conversation_text) = flatten_messages(new_messages);
-    let mut prompt = conversation_text.clone();
-
-    if should_spill_prompt_to_system(&prompt, &req.model, resume_session.as_deref()) {
-        prompt = last_user_message_text(new_messages).unwrap_or_else(|| "Continue.".to_string());
-        if !conversation_text.is_empty() {
-            system_prompt =
-                format!("{system_prompt}\n\nConversation history:\n{conversation_text}");
-        }
+    let prompt = last_user_message_text(new_messages).unwrap_or_else(|| "Continue.".to_string());
+    if !conversation_text.is_empty() {
+        system_prompt = format!("{system_prompt}\n\nConversation history:\n{conversation_text}");
     }
 
     let config = ClaudeCliConfig::new(prompt, system_prompt, req.model.clone())
@@ -251,6 +246,7 @@ fn last_user_message_text(messages: &[crate::models::openai::OAChatMessage]) -> 
         .filter(|text| !text.is_empty())
 }
 
+#[allow(dead_code)]
 fn should_spill_prompt_to_system(prompt: &str, model: &str, resume_session: Option<&str>) -> bool {
     let arg_max = match arg_max_bytes() {
         Some(limit) => limit,
