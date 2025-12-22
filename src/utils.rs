@@ -10,9 +10,9 @@ use crate::models::openai::OAChatMessage;
 use hex::encode as hex_encode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Returns the current Unix timestamp in seconds.
 ///
@@ -200,9 +200,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    args.into_iter()
-        .map(|arg| arg.as_ref().len() + 1)
-        .sum()
+    args.into_iter().map(|arg| arg.as_ref().len() + 1).sum()
 }
 
 #[cfg(test)]

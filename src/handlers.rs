@@ -129,16 +129,11 @@ async fn process_chat_request(req: ChatRequest, req_id: String) -> Result<Respon
     let (_, conversation_text) = flatten_messages(new_messages);
     let mut prompt = conversation_text.clone();
 
-    if should_spill_prompt_to_system(
-        &prompt,
-        &req.model,
-        resume_session.as_deref(),
-    ) {
+    if should_spill_prompt_to_system(&prompt, &req.model, resume_session.as_deref()) {
         prompt = last_user_message_text(new_messages).unwrap_or_else(|| "Continue.".to_string());
         if !conversation_text.is_empty() {
-            system_prompt = format!(
-                "{system_prompt}\n\nConversation history:\n{conversation_text}"
-            );
+            system_prompt =
+                format!("{system_prompt}\n\nConversation history:\n{conversation_text}");
         }
     }
 
@@ -256,11 +251,7 @@ fn last_user_message_text(messages: &[crate::models::openai::OAChatMessage]) -> 
         .filter(|text| !text.is_empty())
 }
 
-fn should_spill_prompt_to_system(
-    prompt: &str,
-    model: &str,
-    resume_session: Option<&str>,
-) -> bool {
+fn should_spill_prompt_to_system(prompt: &str, model: &str, resume_session: Option<&str>) -> bool {
     let arg_max = match arg_max_bytes() {
         Some(limit) => limit,
         None => return false,
@@ -269,9 +260,8 @@ fn should_spill_prompt_to_system(
     let env_bytes = environment_size_bytes();
     let safety_margin = 4096usize;
     let system_prompt_path_len = {
-        let sample = std::env::temp_dir().join(
-            "claude-system-prompt-00000000-0000-0000-0000-000000000000.txt",
-        );
+        let sample = std::env::temp_dir()
+            .join("claude-system-prompt-00000000-0000-0000-0000-000000000000.txt");
         sample.to_string_lossy().len()
     };
 
@@ -296,12 +286,7 @@ fn should_spill_prompt_to_system(
 
     let argv_bytes = argv_size_bytes(args.iter().map(|s| s.as_str()));
 
-    should_spill_prompt_to_system_with_limits(
-        argv_bytes,
-        env_bytes,
-        safety_margin,
-        arg_max,
-    )
+    should_spill_prompt_to_system_with_limits(argv_bytes, env_bytes, safety_margin, arg_max)
 }
 
 fn should_spill_prompt_to_system_with_limits(
@@ -341,9 +326,8 @@ fn prepare_prompt_for_request_with_limits(
     if should_spill {
         prompt = last_user_message_text(messages).unwrap_or_else(|| "Continue.".to_string());
         if !conversation_text.is_empty() {
-            system_prompt = format!(
-                "{system_prompt}\n\nConversation history:\n{conversation_text}"
-            );
+            system_prompt =
+                format!("{system_prompt}\n\nConversation history:\n{conversation_text}");
         }
     }
 
@@ -668,8 +652,8 @@ fn build_done_payload(id: &str, model: &str, created: u64) -> StreamDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::openai::OAChatMessage;
     use crate::cache::clear_cache;
+    use crate::models::openai::OAChatMessage;
     use axum::response::sse::Sse;
     use bytes::Bytes;
     use http_body_util::BodyExt;
