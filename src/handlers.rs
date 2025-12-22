@@ -246,8 +246,9 @@ async fn stream_claude_output(
                 }
             }
             Err(e) => {
-                let _ = tx.send(Err(GatewayError::Parse(e))).await;
-                break;
+                // Claude CLI can emit non-JSON lines; ignore them for streaming clients.
+                warn!(%req_id, error = %e, raw = %line, "failed to parse claude stdout line");
+                continue;
             }
         }
     }
@@ -292,15 +293,8 @@ fn process_claude_record(
                 }
             })
             .map(|text| make_delta_event(id, model, created, None, &text)),
-        ClaudeRecord::Assistant { message, .. } => {
-            let text = extract_text_from_contents(&message.content);
-            if !text.is_empty() {
-                Some(make_delta_event(id, model, created, None, &text))
-            } else {
-                None
-            }
-        }
-        ClaudeRecord::Result { .. } => Some(make_done_event(id, model, created, None)),
+        ClaudeRecord::Assistant { .. } => None,
+        ClaudeRecord::Result { .. } => None,
         ClaudeRecord::Other => None,
     }
 }
