@@ -284,7 +284,13 @@ fn process_claude_record(
         }
         ClaudeRecord::StreamEvent { event, .. } => event
             .delta
-            .and_then(|d| d.text)
+            .and_then(|d| {
+                if let Some(text) = d.text {
+                    Some(text)
+                } else {
+                    d.partial_json
+                }
+            })
             .map(|text| make_delta_event(id, model, created, None, &text)),
         ClaudeRecord::Assistant { message, .. } => {
             let text = extract_text_from_contents(&message.content);
@@ -505,6 +511,7 @@ mod tests {
     use axum::response::sse::Sse;
     use bytes::Bytes;
     use http_body_util::BodyExt;
+    use serial_test::serial;
     use std::convert::Infallible;
     use std::time::Duration;
     use tokio::process::Command;
@@ -545,13 +552,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_stream_claude_output_emits_events_and_caches_session() {
         clear_cache().await;
 
         // Fake Claude stdout with init -> stream delta -> result lines.
         let mut child = Command::new("sh")
             .arg("-c")
-            .arg("printf '%s\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-1\"}' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'")
+            .arg("printf '%s\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-1\"}' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}}' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"name\\\":\\\"tool\\\"}\"}}}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'")
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn fake claude");
@@ -581,17 +589,23 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // First event is role bootstrap, second is streamed text, last is done.
+        // First event is role bootstrap, second is streamed text, third is partial json, last is done.
         let first: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
         assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
         let streamed: serde_json::Value = serde_json::from_str(&payloads[1]).unwrap();
         assert_eq!(streamed["choices"][0]["delta"]["content"], "hello");
+        let partial: serde_json::Value = serde_json::from_str(&payloads[2]).unwrap();
+        assert_eq!(
+            partial["choices"][0]["delta"]["content"],
+            "{\"name\":\"tool\"}"
+        );
 
         let cache = crate::cache::get_cache().lock().await;
         assert_eq!(cache.get("conv-hash"), Some(&"sid-1".to_string()));
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_process_non_streaming_request_collects_usage_and_caches() {
         clear_cache().await;
         let mut child = Command::new("sh")

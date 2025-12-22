@@ -113,6 +113,7 @@ pub fn build_claude_command(config: &ClaudeCliConfig) -> Command {
         .arg(&config.prompt)
         .arg("--output-format")
         .arg("stream-json")
+        .arg("--include-partial-messages")
         .arg("--model")
         .arg(&config.model)
         .arg("--verbose")
@@ -213,6 +214,7 @@ mod tests {
         assert_eq!(args[1], "test");
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"model".to_string()));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
