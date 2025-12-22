@@ -6,9 +6,49 @@
 //! - Reading and parsing output streams
 
 use crate::models::error::GatewayError;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::{fs::File, io::Write};
 use tokio::process::{Child, Command};
-use tracing::info;
+use tracing::{info, warn};
+use uuid::Uuid;
+
+#[derive(Debug)]
+pub struct SystemPromptFile {
+    path: PathBuf,
+}
+
+impl SystemPromptFile {
+    fn new(contents: &str) -> Result<Self, std::io::Error> {
+        let filename = format!("claude-system-prompt-{}.txt", Uuid::new_v4());
+        let path = std::env::temp_dir().join(filename);
+        let mut file = File::create(&path)?;
+        file.write_all(contents.as_bytes())?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SystemPromptFile {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(&self.path) {
+            warn!(
+                path = %self.path.display(),
+                error = %err,
+                "failed to remove system prompt temp file"
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ClaudeCliProcess {
+    pub child: Child,
+    pub system_prompt_file: SystemPromptFile,
+}
 
 /// Configuration for spawning a Claude CLI process.
 #[derive(Debug, Clone)]
@@ -87,6 +127,7 @@ impl ClaudeCliConfig {
 ///
 /// # Arguments
 /// * `config` - Configuration for the Claude CLI process
+/// * `system_prompt_file` - Optional path to a system prompt file
 ///
 /// # Returns
 /// A `Command` ready to spawn, with all arguments configured
@@ -100,9 +141,12 @@ impl ClaudeCliConfig {
 ///     "Be helpful".to_string(),
 ///     "claude-3-5-sonnet-20241022".to_string(),
 /// );
-/// let command = build_claude_command(&config);
+/// let command = build_claude_command(&config, None);
 /// ```
-pub fn build_claude_command(config: &ClaudeCliConfig) -> Command {
+pub fn build_claude_command(
+    config: &ClaudeCliConfig,
+    system_prompt_file: Option<&Path>,
+) -> Command {
     let mut cmd = Command::new("claude");
 
     if let Some(ref session_id) = config.resume_session {
@@ -117,11 +161,15 @@ pub fn build_claude_command(config: &ClaudeCliConfig) -> Command {
         .arg("--model")
         .arg(&config.model)
         .arg("--verbose")
-        .arg("--dangerously-skip-permissions")
-        .arg("--system-prompt")
-        .arg(&config.system_prompt)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg("--dangerously-skip-permissions");
+
+    if let Some(path) = system_prompt_file {
+        cmd.arg("--system-prompt-file").arg(path);
+    } else {
+        cmd.arg("--system-prompt").arg(&config.system_prompt);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     cmd
 }
@@ -132,7 +180,7 @@ pub fn build_claude_command(config: &ClaudeCliConfig) -> Command {
 /// * `config` - Configuration for the Claude CLI process
 ///
 /// # Returns
-/// A spawned `Child` process with stdout and stderr piped
+/// A spawned Claude CLI process with stdout and stderr piped
 ///
 /// # Errors
 /// Returns `GatewayError::Spawn` if the process fails to spawn
@@ -148,19 +196,24 @@ pub fn build_claude_command(config: &ClaudeCliConfig) -> Command {
 ///         "Be helpful".to_string(),
 ///         "claude-3-5-sonnet-20241022".to_string(),
 ///     );
-///     let child = spawn_claude_cli(&config)?;
+///     let process = spawn_claude_cli(&config)?;
 ///     Ok(())
 /// }
 /// ```
-pub fn spawn_claude_cli(config: &ClaudeCliConfig) -> Result<Child, GatewayError> {
+pub fn spawn_claude_cli(config: &ClaudeCliConfig) -> Result<ClaudeCliProcess, GatewayError> {
     info!(
         resume = config.resume_session.as_deref().unwrap_or("<new>"),
         model = %config.model,
         "spawning claude"
     );
 
-    let mut cmd = build_claude_command(config);
-    cmd.spawn().map_err(GatewayError::Spawn)
+    let system_prompt_file = SystemPromptFile::new(&config.system_prompt)?;
+    let mut cmd = build_claude_command(config, Some(system_prompt_file.path()));
+    let child = cmd.spawn().map_err(GatewayError::Spawn)?;
+    Ok(ClaudeCliProcess {
+        child,
+        system_prompt_file,
+    })
 }
 
 #[cfg(test)]
@@ -201,7 +254,7 @@ mod tests {
             "model".to_string(),
         );
 
-        let cmd = build_claude_command(&config);
+        let cmd = build_claude_command(&config, None);
         let std_cmd = cmd.as_std();
         let program = std_cmd.get_program();
         let args: Vec<String> = std_cmd
@@ -222,6 +275,29 @@ mod tests {
     }
 
     #[test]
+    fn test_build_command_with_system_prompt_file() {
+        let config = ClaudeCliConfig::new(
+            "test".to_string(),
+            "system".to_string(),
+            "model".to_string(),
+        );
+
+        let path = Path::new("/tmp/system.txt");
+        let cmd = build_claude_command(&config, Some(path));
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        let pos = args
+            .iter()
+            .position(|a| a == "--system-prompt-file")
+            .expect("missing --system-prompt-file flag");
+        assert_eq!(args.get(pos + 1), Some(&"/tmp/system.txt".to_string()));
+    }
+
+    #[test]
     fn test_build_command_with_resume() {
         let config = ClaudeCliConfig::new(
             "test".to_string(),
@@ -230,7 +306,7 @@ mod tests {
         )
         .with_resume_session(Some("session-abc".to_string()));
 
-        let cmd = build_claude_command(&config);
+        let cmd = build_claude_command(&config, None);
         let program = cmd.as_std().get_program();
         assert_eq!(program, "claude");
 

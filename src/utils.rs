@@ -11,6 +11,8 @@ use hex::encode as hex_encode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 
 /// Returns the current Unix timestamp in seconds.
 ///
@@ -154,6 +156,53 @@ pub fn flatten_messages(messages: &[OAChatMessage]) -> (String, String) {
     }
 
     (system, blocks.join("\n"))
+}
+
+/// Returns the OS argument size limit in bytes, if available.
+#[allow(dead_code)]
+pub fn arg_max_bytes() -> Option<usize> {
+    #[cfg(unix)]
+    unsafe {
+        let value = libc::sysconf(libc::_SC_ARG_MAX);
+        if value > 0 {
+            Some(value as usize)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Estimates environment size in bytes for exec argument accounting.
+#[allow(dead_code)]
+pub fn environment_size_bytes() -> usize {
+    #[cfg(unix)]
+    {
+        std::env::vars_os()
+            .map(|(k, v)| k.as_bytes().len() + 1 + v.as_bytes().len() + 1)
+            .sum()
+    }
+
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// Estimates total argv size in bytes (including NUL terminators).
+#[allow(dead_code)]
+pub fn argv_size_bytes<I, S>(args: I) -> usize
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|arg| arg.as_ref().len() + 1)
+        .sum()
 }
 
 #[cfg(test)]

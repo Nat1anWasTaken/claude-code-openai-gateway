@@ -6,14 +6,17 @@
 //! - Converting between OpenAI and Claude formats
 
 use crate::cache::{find_cached_prefix, store_session};
-use crate::claude_cli::{spawn_claude_cli, ClaudeCliConfig};
+use crate::claude_cli::{spawn_claude_cli, ClaudeCliConfig, ClaudeCliProcess, SystemPromptFile};
 use crate::models::claude::{extract_text_from_contents, ClaudeRecord};
 use crate::models::error::GatewayError;
 use crate::models::openai::{
     ChatChoice, ChatCompletionResponse, ChatRequest, Delta, OAChatMessageOut, StreamChoice,
     StreamDelta,
 };
-use crate::utils::{compute_message_hash, flatten_messages, message_hash_material, unix_timestamp};
+use crate::utils::{
+    arg_max_bytes, argv_size_bytes, compute_message_hash, environment_size_bytes, flatten_messages,
+    message_hash_material, unix_timestamp,
+};
 use axum::{
     extract::{Extension, State},
     http::StatusCode,
@@ -89,7 +92,7 @@ async fn process_chat_request(req: ChatRequest, req_id: String) -> Result<Respon
     let conversation_hash = compute_message_hash(&req.messages);
     debug!(conversation_hash = %conversation_hash, "computed conversation hash");
     trace!(material = %message_hash_material(&req.messages).replace('\n', "\\n"), "conversation hash material");
-    let (system_prompt, _) = flatten_messages(&req.messages);
+    let (mut system_prompt, _) = flatten_messages(&req.messages);
 
     let (mut resume_session, mut history_prefix_len) = find_cached_prefix(
         |cut| {
@@ -123,24 +126,59 @@ async fn process_chat_request(req: ChatRequest, req_id: String) -> Result<Respon
         &req.messages[..]
     };
 
-    let (_, prompt) = flatten_messages(new_messages);
+    let (_, conversation_text) = flatten_messages(new_messages);
+    let mut prompt = conversation_text.clone();
+
+    if should_spill_prompt_to_system(
+        &prompt,
+        &req.model,
+        resume_session.as_deref(),
+    ) {
+        prompt = last_user_message_text(new_messages).unwrap_or_else(|| "Continue.".to_string());
+        if !conversation_text.is_empty() {
+            system_prompt = format!(
+                "{system_prompt}\n\nConversation history:\n{conversation_text}"
+            );
+        }
+    }
 
     let config = ClaudeCliConfig::new(prompt, system_prompt, req.model.clone())
         .with_resume_session(resume_session.clone());
 
-    let mut child = spawn_claude_cli(&config)?;
+    let ClaudeCliProcess {
+        mut child,
+        system_prompt_file,
+    } = spawn_claude_cli(&config)?;
 
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| GatewayError::Spawn(std::io::Error::other("missing stdout")))?;
     let stderr = child.stderr.take();
+    let system_prompt_file = Some(system_prompt_file);
 
     if req.stream {
-        process_streaming_request(stdout, stderr, req.model, conversation_hash, req_id).await
+        process_streaming_request(
+            stdout,
+            stderr,
+            child,
+            system_prompt_file,
+            req.model,
+            conversation_hash,
+            req_id,
+        )
+        .await
     } else {
-        process_non_streaming_request(stdout, stderr, child, req.model, conversation_hash, req_id)
-            .await
+        process_non_streaming_request(
+            stdout,
+            stderr,
+            child,
+            system_prompt_file,
+            req.model,
+            conversation_hash,
+            req_id,
+        )
+        .await
     }
 }
 
@@ -159,11 +197,36 @@ async fn process_chat_request(req: ChatRequest, req_id: String) -> Result<Respon
 /// SSE streaming response
 async fn process_streaming_request(
     stdout: tokio::process::ChildStdout,
-    _stderr: Option<ChildStderr>,
+    stderr: Option<ChildStderr>,
+    mut child: tokio::process::Child,
+    system_prompt_file: Option<SystemPromptFile>,
     model: String,
     conversation_hash: String,
     req_id: String,
 ) -> Result<Response, GatewayError> {
+    let req_id_cleanup = req_id.clone();
+    tokio::spawn(async move {
+        let stderr_text = collect_stderr_output(stderr).await.unwrap_or_default();
+        match child.wait().await {
+            Ok(status) if !status.success() => {
+                let msg = if stderr_text.is_empty() {
+                    format!("claude exited with {}", status)
+                } else {
+                    stderr_text
+                };
+                warn!(%req_id_cleanup, error = %msg, "claude exited with error");
+            }
+            Ok(_) if !stderr_text.is_empty() => {
+                warn!(%req_id_cleanup, stderr = %stderr_text, "claude stderr");
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(%req_id_cleanup, error = %err, "failed to wait for claude");
+            }
+        }
+        drop(system_prompt_file);
+    });
+
     let (tx, rx) = mpsc::channel::<Result<Event, GatewayError>>(16);
 
     tokio::spawn(async move {
@@ -182,6 +245,109 @@ async fn process_streaming_request(
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::new())
         .into_response())
+}
+
+fn last_user_message_text(messages: &[crate::models::openai::OAChatMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|msg| msg.role == "user")
+        .map(|msg| crate::utils::extract_text_from_value(&msg.content))
+        .filter(|text| !text.is_empty())
+}
+
+fn should_spill_prompt_to_system(
+    prompt: &str,
+    model: &str,
+    resume_session: Option<&str>,
+) -> bool {
+    let arg_max = match arg_max_bytes() {
+        Some(limit) => limit,
+        None => return false,
+    };
+
+    let env_bytes = environment_size_bytes();
+    let safety_margin = 4096usize;
+    let system_prompt_path_len = {
+        let sample = std::env::temp_dir().join(
+            "claude-system-prompt-00000000-0000-0000-0000-000000000000.txt",
+        );
+        sample.to_string_lossy().len()
+    };
+
+    let mut args = vec![
+        "-p".to_string(),
+        prompt.to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--model".to_string(),
+        model.to_string(),
+        "--verbose".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--system-prompt-file".to_string(),
+        "x".repeat(system_prompt_path_len.max(1)),
+    ];
+
+    if let Some(session) = resume_session {
+        args.insert(0, session.to_string());
+        args.insert(0, "--resume".to_string());
+    }
+
+    let argv_bytes = argv_size_bytes(args.iter().map(|s| s.as_str()));
+
+    should_spill_prompt_to_system_with_limits(
+        argv_bytes,
+        env_bytes,
+        safety_margin,
+        arg_max,
+    )
+}
+
+fn should_spill_prompt_to_system_with_limits(
+    argv_bytes: usize,
+    env_bytes: usize,
+    safety_margin: usize,
+    arg_max: usize,
+) -> bool {
+    argv_bytes
+        .saturating_add(env_bytes)
+        .saturating_add(safety_margin)
+        > arg_max
+}
+
+#[cfg(test)]
+fn prepare_prompt_for_request_with_limits(
+    messages: &[crate::models::openai::OAChatMessage],
+    model: &str,
+    resume_session: Option<&str>,
+    argv_bytes: usize,
+    env_bytes: usize,
+    safety_margin: usize,
+    arg_max: usize,
+) -> (String, String) {
+    let (mut system_prompt, _) = flatten_messages(messages);
+    let (_, conversation_text) = flatten_messages(messages);
+    let mut prompt = conversation_text.clone();
+
+    let should_spill = if resume_session.is_some() {
+        let _ = resume_session;
+        should_spill_prompt_to_system_with_limits(argv_bytes, env_bytes, safety_margin, arg_max)
+    } else {
+        let _ = model;
+        should_spill_prompt_to_system_with_limits(argv_bytes, env_bytes, safety_margin, arg_max)
+    };
+
+    if should_spill {
+        prompt = last_user_message_text(messages).unwrap_or_else(|| "Continue.".to_string());
+        if !conversation_text.is_empty() {
+            system_prompt = format!(
+                "{system_prompt}\n\nConversation history:\n{conversation_text}"
+            );
+        }
+    }
+
+    (system_prompt, prompt)
 }
 
 /// Streams Claude CLI output as Server-Sent Events.
@@ -320,6 +486,7 @@ async fn process_non_streaming_request(
     stdout: tokio::process::ChildStdout,
     stderr: Option<ChildStderr>,
     mut child: tokio::process::Child,
+    _system_prompt_file: Option<SystemPromptFile>,
     model: String,
     conversation_hash: String,
     req_id: String,
@@ -501,6 +668,7 @@ fn build_done_payload(id: &str, model: &str, created: u64) -> StreamDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::openai::OAChatMessage;
     use crate::cache::clear_cache;
     use axum::response::sse::Sse;
     use bytes::Bytes;
@@ -618,6 +786,7 @@ mod tests {
             stdout,
             None,
             child,
+            None,
             "test-model".into(),
             "hash-usage".into(),
             "req-usage".into(),
@@ -669,5 +838,77 @@ mod tests {
             let result = collect_stderr_output(None).await.unwrap();
             assert_eq!(result, "");
         });
+    }
+
+    #[test]
+    fn test_last_user_message_text_finds_latest_user() {
+        let messages = vec![
+            OAChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("hi"),
+            },
+            OAChatMessage {
+                role: "assistant".to_string(),
+                content: serde_json::json!("hello"),
+            },
+            OAChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("latest"),
+            },
+        ];
+
+        let text = last_user_message_text(&messages);
+        assert_eq!(text.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn test_should_spill_prompt_to_system_with_limits() {
+        assert!(
+            should_spill_prompt_to_system_with_limits(9000, 2000, 4096, 12000),
+            "argv + env + margin exceeds arg_max"
+        );
+        assert!(
+            !should_spill_prompt_to_system_with_limits(3000, 2000, 4096, 12000),
+            "argv + env + margin within arg_max"
+        );
+    }
+
+    #[test]
+    fn test_prepare_prompt_spills_conversation_into_system() {
+        let messages = vec![
+            OAChatMessage {
+                role: "system".to_string(),
+                content: serde_json::json!("System rules"),
+            },
+            OAChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("Hello"),
+            },
+            OAChatMessage {
+                role: "assistant".to_string(),
+                content: serde_json::json!("Hi there"),
+            },
+            OAChatMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("Latest question"),
+            },
+        ];
+
+        let (system_prompt, prompt) = prepare_prompt_for_request_with_limits(
+            &messages,
+            "test-model",
+            None,
+            9000,
+            2000,
+            4096,
+            12000,
+        );
+
+        assert!(system_prompt.contains("System rules"));
+        assert!(system_prompt.contains("Conversation history:"));
+        assert!(system_prompt.contains("User: Hello"));
+        assert!(system_prompt.contains("Assistant: Hi there"));
+        assert!(system_prompt.contains("User: Latest question"));
+        assert_eq!(prompt, "Latest question");
     }
 }
