@@ -1,7 +1,7 @@
 //! Error types for the Claude OpenAI Gateway.
 //!
 //! This module defines all error types that can occur during gateway operation,
-//! including process spawning failures, parsing errors, and CLI errors.
+//! including process spawning failures and CLI errors.
 
 use thiserror::Error;
 
@@ -17,13 +17,6 @@ pub enum GatewayError {
     /// * Source error from the I/O operation that failed
     #[error("failed to spawn claude: {0}")]
     Spawn(#[source] std::io::Error),
-
-    /// Failed to parse Claude CLI output as JSON.
-    ///
-    /// # Arguments
-    /// * Source error from the JSON deserialization that failed
-    #[error("failed to parse claude output: {0}")]
-    Parse(#[source] serde_json::Error),
 
     /// Claude CLI exited with an error or wrote to stderr.
     ///
