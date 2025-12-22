@@ -284,6 +284,24 @@ fn should_spill_prompt_to_system(prompt: &str, model: &str, resume_session: Opti
         args.insert(0, "--resume".to_string());
     }
 
+    let overhead_without_prompt = {
+        let mut base_args = args.clone();
+        if let Some(pos) = base_args.iter().position(|arg| arg == "-p") {
+            if let Some(value) = base_args.get_mut(pos + 1) {
+                value.clear();
+            }
+        }
+        argv_size_bytes(base_args.iter().map(|s| s.as_str())).saturating_sub(1)
+    };
+
+    let safe_prompt_len = arg_max
+        .saturating_sub(env_bytes)
+        .saturating_sub(safety_margin)
+        .saturating_sub(overhead_without_prompt);
+    if prompt.len().saturating_add(1) > safe_prompt_len {
+        return true;
+    }
+
     let argv_bytes = argv_size_bytes(args.iter().map(|s| s.as_str()));
 
     should_spill_prompt_to_system_with_limits(argv_bytes, env_bytes, safety_margin, arg_max)
