@@ -25,7 +25,7 @@ impl PromptFile {
         let path = std::env::temp_dir().join(filename);
         let mut file = File::create(&path)?;
         file.write_all(contents.as_bytes())?;
-        info!(path = %path.display(), bytes = contents.len(), "created system prompt file");
+        info!(path = %path.display(), bytes = contents.len(), "created prompt file");
         Ok(Self { path })
     }
 
@@ -40,12 +40,12 @@ impl Drop for PromptFile {
             warn!(
                 path = %self.path.display(),
                 error = %err,
-                "failed to remove system prompt temp file"
+                "failed to remove prompt temp file"
             );
         } else {
             info!(
                 path = %self.path.display(),
-                "removed system prompt temp file"
+                "removed prompt temp file"
             );
         }
     }
