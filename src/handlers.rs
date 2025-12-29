@@ -6,7 +6,7 @@
 //! - Converting between OpenAI and Claude formats
 
 use crate::cache::{find_cached_prefix, store_session};
-use crate::claude_cli::{spawn_claude_cli, ClaudeCliConfig, ClaudeCliProcess, SystemPromptFile};
+use crate::claude_cli::{spawn_claude_cli, ClaudeCliConfig, ClaudeCliProcess, PromptFile};
 use crate::models::claude::{extract_text_from_contents, ClaudeRecord};
 use crate::models::error::GatewayError;
 use crate::models::openai::{
@@ -185,7 +185,7 @@ async fn process_streaming_request(
     stdout: tokio::process::ChildStdout,
     stderr: Option<ChildStderr>,
     mut child: tokio::process::Child,
-    system_prompt_file: Option<SystemPromptFile>,
+    system_prompt_file: Option<PromptFile>,
     model: String,
     conversation_hash: String,
     req_id: String,
@@ -370,7 +370,7 @@ async fn process_non_streaming_request(
     stdout: tokio::process::ChildStdout,
     stderr: Option<ChildStderr>,
     mut child: tokio::process::Child,
-    _system_prompt_file: Option<SystemPromptFile>,
+    _system_prompt_file: Option<PromptFile>,
     model: String,
     conversation_hash: String,
     req_id: String,

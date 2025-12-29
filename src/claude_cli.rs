@@ -10,15 +10,16 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::{fs::File, io::Write};
 use tokio::process::{Child, Command};
+use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 #[derive(Debug)]
-pub struct SystemPromptFile {
+pub struct PromptFile {
     path: PathBuf,
 }
 
-impl SystemPromptFile {
+impl PromptFile {
     fn new(contents: &str) -> Result<Self, std::io::Error> {
         let filename = format!("claude-system-prompt-{}.txt", Uuid::new_v4());
         let path = std::env::temp_dir().join(filename);
@@ -33,7 +34,7 @@ impl SystemPromptFile {
     }
 }
 
-impl Drop for SystemPromptFile {
+impl Drop for PromptFile {
     fn drop(&mut self) {
         if let Err(err) = std::fs::remove_file(&self.path) {
             warn!(
@@ -53,7 +54,7 @@ impl Drop for SystemPromptFile {
 #[derive(Debug)]
 pub struct ClaudeCliProcess {
     pub child: Child,
-    pub system_prompt_file: SystemPromptFile,
+    pub system_prompt_file: PromptFile,
 }
 
 /// Configuration for spawning a Claude CLI process.
@@ -160,7 +161,6 @@ pub fn build_claude_command(
     }
 
     cmd.arg("-p")
-        .arg(&config.prompt)
         .arg("--output-format")
         .arg("stream-json")
         .arg("--include-partial-messages")
@@ -175,7 +175,9 @@ pub fn build_claude_command(
         cmd.arg("--system-prompt").arg(&config.system_prompt);
     }
 
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     cmd
 }
@@ -213,9 +215,17 @@ pub fn spawn_claude_cli(config: &ClaudeCliConfig) -> Result<ClaudeCliProcess, Ga
         "spawning claude"
     );
 
-    let system_prompt_file = SystemPromptFile::new(&config.system_prompt)?;
+    let system_prompt_file = PromptFile::new(&config.system_prompt)?;
     let mut cmd = build_claude_command(config, Some(system_prompt_file.path()));
-    let child = cmd.spawn().map_err(GatewayError::Spawn)?;
+    let mut child = cmd.spawn().map_err(GatewayError::Spawn)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let prompt = config.prompt.clone();
+        tokio::spawn(async move {
+            if stdin.write_all(prompt.as_bytes()).await.is_ok() {
+                let _ = stdin.shutdown().await;
+            }
+        });
+    }
     Ok(ClaudeCliProcess {
         child,
         system_prompt_file,
@@ -270,14 +280,14 @@ mod tests {
 
         assert_eq!(program, "claude");
         assert_eq!(args[0], "-p");
-        assert_eq!(args[1], "test");
-        assert!(args.contains(&"--output-format".to_string()));
+        assert_eq!(args[1], "--output-format");
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--include-partial-messages".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"model".to_string()));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--system-prompt".to_string()));
+        assert!(!args.contains(&"test".to_string()));
     }
 
     #[test]
