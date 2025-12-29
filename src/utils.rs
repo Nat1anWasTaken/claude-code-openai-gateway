@@ -10,7 +10,6 @@ use crate::models::openai::OAChatMessage;
 use hex::encode as hex_encode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Returns the current Unix timestamp in seconds.
