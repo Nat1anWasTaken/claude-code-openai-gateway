@@ -13,9 +13,7 @@ use crate::models::openai::{
     ChatChoice, ChatCompletionResponse, ChatRequest, Delta, OAChatMessageOut, StreamChoice,
     StreamDelta,
 };
-use crate::utils::{
-    compute_message_hash, flatten_messages, message_hash_material, unix_timestamp,
-};
+use crate::utils::{compute_message_hash, flatten_messages, message_hash_material, unix_timestamp};
 use axum::{
     extract::{Extension, State},
     http::StatusCode,
@@ -232,7 +230,6 @@ async fn process_streaming_request(
         .keep_alive(KeepAlive::new())
         .into_response())
 }
-
 
 /// Streams Claude CLI output as Server-Sent Events.
 ///
@@ -722,5 +719,4 @@ mod tests {
             assert_eq!(result, "");
         });
     }
-
 }
