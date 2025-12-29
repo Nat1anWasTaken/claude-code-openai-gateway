@@ -28,7 +28,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "request-id"] }
 http = "1"
-libc = "0.2"
 
 [dev-dependencies]
 bytes = "1"

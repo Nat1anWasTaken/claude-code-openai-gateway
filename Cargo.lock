@@ -138,7 +138,6 @@ dependencies = [
  "hex",
  "http",
  "http-body-util",
- "libc",
  "serde",
  "serde_json",
  "serial_test",
