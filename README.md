@@ -1,6 +1,6 @@
 # Claude Code OpenAI Gateway
 
-Tiny Rust HTTP server that forwards OpenAI-style `POST /v1/chat/completions` requests to the Claude CLI (`claude --output-format stream-json`) and streams the results back as either SSE (`stream: true`) or a single JSON completion.
+Tiny Rust HTTP server that forwards OpenAI-style `POST /v1/chat/completions` requests to the Claude CLI (`claude --output-format stream-json --tools ""`) and streams the results back as either SSE (`stream: true`) or a single JSON completion.
 
 ## Quick start
 

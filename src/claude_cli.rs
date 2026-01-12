@@ -164,6 +164,8 @@ pub fn build_claude_command(
         .arg("--output-format")
         .arg("stream-json")
         .arg("--include-partial-messages")
+        .arg("--tools")
+        .arg("")
         .arg("--model")
         .arg(&config.model)
         .arg("--verbose")
@@ -283,6 +285,11 @@ mod tests {
         assert_eq!(args[1], "--output-format");
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--include-partial-messages".to_string()));
+        let tools_pos = args
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("missing --tools flag");
+        assert_eq!(args.get(tools_pos + 1), Some(&"".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"model".to_string()));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
